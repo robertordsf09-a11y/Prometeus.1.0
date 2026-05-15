@@ -5,9 +5,10 @@ import os
 import subprocess
 import sys
 import threading
+import queue
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 import customtkinter as ctk
 from PIL import Image
@@ -32,18 +33,22 @@ def obter_diretorio_base() -> str:
 BASE_DIR: str = obter_diretorio_base()
 
 
-def criar_logger(nome_modulo: str, usuario: str = "sistema") -> logging.Logger:
+def criar_logger(nome_modulo: str, usuario: str = "sistema", nome_log: str | None = None) -> logging.Logger:
     """
     Cria logger configurado com formato padrão e rotação de arquivo.
-    Salva logs em PROMETEUS_ROOT_DIR/logs/aplicacao.log quando chamado via Prometeus.
+    Salva logs em PROMETEUS_ROOT_DIR/logs/{nome_log}.log.
     """
     usuario_real = os.environ.get("PROMETEUS_USER", usuario)
     dir_base = os.environ.get("PROMETEUS_ROOT_DIR", BASE_DIR)
     
+    # Se nome_log não for fornecido, tenta pegar da env var ou usa 'aplicacao'
+    if not nome_log:
+        nome_log = os.environ.get("PROMETEUS_APP_NAME", "aplicacao")
+    
     formato = f"[%(asctime)s],[{usuario_real}],[{nome_modulo}] %(levelname)s: %(message)s"
     formatador = logging.Formatter(formato, datefmt="%Y-%m-%d %H:%M:%S")
 
-    caminho_log = os.path.join(dir_base, "logs", "aplicacao.log")
+    caminho_log = os.path.join(dir_base, "logs", f"{nome_log}.log")
     os.makedirs(os.path.dirname(caminho_log), exist_ok=True)
 
     handler_arquivo = RotatingFileHandler(
@@ -260,6 +265,10 @@ class GerenciadorDeAplicacoes(ctk.CTk):
 
         self.pastas_alvo = ["App.Gemco", "Ar.Excel", "NF_CTE"]
         self.nos_arvore: list[NoDePasta] = []
+        
+        # Gerenciamento de Fila de Execução
+        self._fila_execucao: queue.Queue[dict[str, str]] = queue.Queue()
+        self._trabalhador_ativo: bool = False
         
         self._configurar_grid_base()
         self._exibir_tela_login()
@@ -487,30 +496,56 @@ class GerenciadorDeAplicacoes(ctk.CTk):
             no.definir_estado(False)
 
     def _executar_async(self, caminho: str, nome: str) -> None:
-        """Inicia a execução do script em uma thread separada."""
-        thread = threading.Thread(
-            target=self._rotina_execucao, args=(caminho, nome), daemon=True
-        )
-        thread.start()
+        """Adiciona o script à fila de execução."""
+        LOGGER.info(f"Agendando execução: {nome}")
+        self._fila_execucao.put({"caminho": caminho, "nome": nome})
+        
+        if not self._trabalhador_ativo:
+            self._trabalhador_ativo = True
+            threading.Thread(target=self._processar_fila_execucao, daemon=True).start()
 
-    def _rotina_execucao(self, caminho: str, nome: str) -> None:
-        """Lógica de execução externa do script."""
-        LOGGER.info(f"Iniciando script: {nome}")
+    def _processar_fila_execucao(self) -> None:
+        """Worker thread que processa scripts um a um."""
+        while not self._fila_execucao.empty():
+            tarefa = self._fila_execucao.get()
+            caminho = tarefa["caminho"]
+            nome = tarefa["nome"]
+            
+            self._rotina_execucao_sync(caminho, nome)
+            self._fila_execucao.task_done()
+            
+        self._trabalhador_ativo = False
+
+    def _rotina_execucao_sync(self, caminho: str, nome: str) -> None:
+        """Lógica de execução síncrona dentro da thread do worker."""
+        # Limpa o nome para o log (ex: AltCust.py -> altcust)
+        nome_log = os.path.splitext(nome)[0].lower().replace(" ", "_")
+        
+        LOGGER.info(f"Iniciando execução sequencial: {nome} | Log: {nome_log}.log")
         try:
-            # Executa em processo separado para não travar a aplicação pai
             env = os.environ.copy()
             env["PROMETEUS_USER"] = self.usuario_atual or "sistema"
             env["PROMETEUS_ROOT_DIR"] = BASE_DIR
-            env["PROMETEUS_AUTH_TOKEN"] = "PR0M3T3U5_L0CK_2026"  # Token de segurança para sub-módulos
+            env["PROMETEUS_APP_NAME"] = nome_log
+            env["PROMETEUS_AUTH_TOKEN"] = "PR0M3T3U5_L0CK_2026"
+
             if getattr(sys, "frozen", False) and caminho.endswith(".exe"):
                 cmd = [caminho]
             else:
                 cmd = [sys.executable, caminho]
                 
-            subprocess.Popen(cmd, cwd=os.path.dirname(caminho), env=env)
+            # Usa subprocess.run para esperar a conclusão antes de seguir para o próximo
+            resultado = subprocess.run(
+                cmd, 
+                cwd=os.path.dirname(caminho), 
+                env=env,
+                capture_output=False  # Saída vai para os logs do próprio sub-app
+            )
+            
+            LOGGER.info(f"Finalizado: {nome} | Status: {resultado.returncode}")
         except Exception:
-            LOGGER.exception(f"Falha crítica na execução de {nome}")
-            self.after(0, lambda: self._notificar_erro(f"Não foi possível abrir o script: {nome}"))
+            LOGGER.exception(f"Falha na execução de {nome}")
+            self.after(0, lambda: self._notificar_erro(f"Erro ao executar sub-aplicativo: {nome}"))
 
     def _notificar_erro(self, msg: str) -> None:
         """Exibe popup de erro na thread principal."""

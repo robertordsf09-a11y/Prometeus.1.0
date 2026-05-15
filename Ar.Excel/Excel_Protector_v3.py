@@ -56,15 +56,16 @@ EXTENSOES_EXCEL = {".xlsx", ".xlsm", ".xls", ".xlsb"}
 def criar_logger(nome_modulo: str, usuario: str = "sistema", caminho_log_especifico: str | None = None) -> logging.Logger:
     """
     Cria logger configurado com formato padrão e rotação de arquivo.
-    Salva logs em PROMETEUS_ROOT_DIR/logs/aplicacao.log quando chamado via Prometeus.
+    Salva logs em PROMETEUS_ROOT_DIR/logs/{nome_log}.log.
     """
     usuario_real = os.environ.get("PROMETEUS_USER", usuario)
     dir_base = os.environ.get("PROMETEUS_ROOT_DIR", BASE_DIR)
+    nome_log = os.environ.get("PROMETEUS_APP_NAME", "aplicacao")
     
     formato = f"[%(asctime)s],[{usuario_real}],[{nome_modulo}] %(levelname)s: %(message)s"
     formatador = logging.Formatter(formato, datefmt="%Y-%m-%d %H:%M:%S")
 
-    caminho_log = caminho_log_especifico if caminho_log_especifico else os.path.join(dir_base, "logs", "excel_protector.log")
+    caminho_log = caminho_log_especifico if caminho_log_especifico else os.path.join(dir_base, "logs", f"{nome_log}.log")
     os.makedirs(os.path.dirname(caminho_log), exist_ok=True)
 
     handler_arquivo = RotatingFileHandler(
@@ -75,12 +76,12 @@ def criar_logger(nome_modulo: str, usuario: str = "sistema", caminho_log_especif
     handler_console = logging.StreamHandler()
     handler_console.setFormatter(formatador)
 
-    logger = logging.getLogger(nome_modulo)
-    logger.setLevel(logging.INFO)
-    logger.handlers.clear()
-    logger.addHandler(handler_arquivo)
-    logger.addHandler(handler_console)
-    return logger
+    logger_inst = logging.getLogger(nome_modulo)
+    logger_inst.setLevel(logging.INFO)
+    logger_inst.handlers.clear()
+    logger_inst.addHandler(handler_arquivo)
+    logger_inst.addHandler(handler_console)
+    return logger_inst
 
 logger_padrao = criar_logger("excel_protector")
 
@@ -482,5 +483,11 @@ def validar_execucao_segura() -> None:
 
 if __name__ == "__main__":
     validar_execucao_segura()
-    app = App()
-    app.mainloop()
+    logger_padrao.info("Iniciando instância da sub-aplicação Excel Protector")
+    try:
+        app = App()
+        app.mainloop()
+        logger_padrao.info("Sub-aplicação Excel Protector encerrada normalmente")
+    except Exception:
+        logger_padrao.exception("Falha crítica na execução da sub-aplicação Excel Protector")
+        sys.exit(1)

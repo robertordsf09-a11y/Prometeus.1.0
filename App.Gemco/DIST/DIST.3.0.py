@@ -8,7 +8,6 @@ import threading
 import time
 import traceback
 from dataclasses import dataclass, field
-from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from typing import Any, Callable
 
@@ -42,15 +41,16 @@ BASE_DIR: str = obter_diretorio_base()
 def criar_logger(nome_modulo: str, usuario: str = "sistema") -> logging.Logger:
     """
     Cria logger configurado com formato padrão e rotação de arquivo.
-    Salva logs em PROMETEUS_ROOT_DIR/logs/aplicacao.log quando chamado via Prometeus.
+    Salva logs em PROMETEUS_ROOT_DIR/logs/{nome_log}.log.
     """
     usuario_real = os.environ.get("PROMETEUS_USER", usuario)
     dir_base = os.environ.get("PROMETEUS_ROOT_DIR", BASE_DIR)
+    nome_log = os.environ.get("PROMETEUS_APP_NAME", "aplicacao")
     
     formato = f"[%(asctime)s],[{usuario_real}],[{nome_modulo}] %(levelname)s: %(message)s"
     formatador = logging.Formatter(formato, datefmt="%Y-%m-%d %H:%M:%S")
 
-    caminho_log = os.path.join(dir_base, "logs", "aplicacao.log")
+    caminho_log = os.path.join(dir_base, "logs", f"{nome_log}.log")
     os.makedirs(os.path.dirname(caminho_log), exist_ok=True)
 
     handler_arquivo = RotatingFileHandler(
@@ -72,22 +72,6 @@ def criar_logger(nome_modulo: str, usuario: str = "sistema") -> logging.Logger:
 
 
 logger = criar_logger("dist")
-
-
-def registrar_log(usuario: str, mensagem: str, coluna: str = "", valor: str = "") -> None:
-    """Registra uma entrada simples de log da automação no arquivo antigo (retrocompatibilidade) e no novo."""
-    data_hora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-    log_entry = (
-        f"[{data_hora}] Usuário: {usuario} | Coluna: {coluna} "
-        f"| Valor: {valor} | Evento: {mensagem}\n"
-    )
-    try:
-        caminho_log = os.path.join(BASE_DIR, "log_automacao.txt")
-        with open(caminho_log, "a", encoding="utf-8") as f:
-            f.write(log_entry)
-        logger.info("Log registrado: %s | col: %s | val: %s", mensagem, coluna, valor)
-    except Exception:
-        logger.exception("registrar_log | Falha ao gravar log no arquivo antigo | caminho=%s", caminho_log)
 
 
 def formatar_numero_limpo(valor: Any) -> str:
@@ -397,22 +381,26 @@ class AutomacaoApp(BaseUI):
                 except Exception:
                     pass
                 time.sleep(0.5)
+    
+    '''verificar popup deve verificar se algum dos popups da lista de popups aparece na tela: popup.png, ERRODV.png'''
 
     def _verificar_popup(self, ultimo_codigo: str) -> bool:
         """Verifica a ocorrência de popup de erro/bloqueio."""
-        img_popup = self._obter_caminho_imagem("popup.png")
-        if os.path.exists(img_popup):
-            try:
-                if pyautogui.locateOnScreen(img_popup, confidence=0.6):
-                    registrar_log(
-                        self.usuario_logado,
-                        "BLOQUEIO: Popup",
-                        self.coluna_sel,
-                        ultimo_codigo,
-                    )
-                    return True
-            except Exception:
-                pass
+        popups = ["popup.png", "ERRODV.png"]
+        for nome_popup in popups:
+            img_popup = self._obter_caminho_imagem(nome_popup)
+            if os.path.exists(img_popup):
+                try:
+                    if pyautogui.locateOnScreen(img_popup, confidence=0.6):
+                        logger.info(
+                            "BLOQUEIO DETECTADO | popup=%s | col=%s | val=%s",
+                            nome_popup,
+                            self.coluna_sel,
+                            ultimo_codigo,
+                        )
+                        return True
+                except Exception:
+                    pass
         return False
 
     def _executar_automacao_worker(self) -> None:
@@ -448,9 +436,9 @@ class AutomacaoApp(BaseUI):
             # Ocultar janela
             self._fila_ui.put({"acao": "callback", "callback": self.iconify})
             
-            registrar_log(
-                self.usuario_logado,
-                f"Início — Itens: {len(df_filtrado)}",
+            logger.info(
+                "Início da automação | itens=%d | col=%s",
+                len(df_filtrado),
                 self.coluna_sel,
             )
             time.sleep(2)
@@ -491,8 +479,10 @@ class AutomacaoApp(BaseUI):
                         self._fila_ui.put({"acao": "erro", "mensagem": f"Interrupção no item: {comando}"})
                         break
                         
-                    registrar_log(
-                        self.usuario_logado, "Item OK", self.coluna_sel, comando
+                    logger.info(
+                        "Item processado com sucesso | col=%s | val=%s",
+                        self.coluna_sel,
+                        comando,
                     )
                 else:
                     self._fila_ui.put({"acao": "erro", "mensagem": f"Campo não limpou para: {comando}"})
@@ -540,5 +530,11 @@ def validar_execucao_segura() -> None:
 
 if __name__ == "__main__":
     validar_execucao_segura()
-    main()
+    logger.info("Iniciando instância da sub-aplicação DIST")
+    try:
+        main()
+        logger.info("Sub-aplicação DIST encerrada normalmente")
+    except Exception:
+        logger.exception("Falha crítica na execução da sub-aplicação DIST")
+        sys.exit(1)
 

@@ -43,15 +43,16 @@ os.makedirs(PASTA_ERROS, exist_ok=True)
 def criar_logger(nome_modulo: str, usuario: str = "sistema") -> logging.Logger:
     """
     Cria logger configurado com formato padrão e rotação de arquivo.
-    Salva logs em PROMETEUS_ROOT_DIR/logs/aplicacao.log quando chamado via Prometeus.
+    Salva logs em PROMETEUS_ROOT_DIR/logs/{nome_log}.log.
     """
     usuario_real = os.environ.get("PROMETEUS_USER", usuario)
     dir_base = os.environ.get("PROMETEUS_ROOT_DIR", BASE_DIR)
+    nome_log = os.environ.get("PROMETEUS_APP_NAME", "aplicacao")
     
     formato = f"[%(asctime)s],[{usuario_real}],[{nome_modulo}] %(levelname)s: %(message)s"
     formatador = logging.Formatter(formato, datefmt="%Y-%m-%d %H:%M:%S")
 
-    caminho_log = os.path.join(dir_base, "logs", "aplicacao.log")
+    caminho_log = os.path.join(dir_base, "logs", f"{nome_log}.log")
     os.makedirs(os.path.dirname(caminho_log), exist_ok=True)
 
     handler_arquivo = RotatingFileHandler(
@@ -515,9 +516,11 @@ def validar_execucao_segura() -> None:
 
 if __name__ == "__main__":
     validar_execucao_segura()
+    logger.info("Iniciando instância da sub-aplicação Mephisto")
     try:
         app = AplicacaoPrincipal()
         app.mainloop()
+        logger.info("Sub-aplicação Mephisto encerrada normalmente")
     except Exception as e:
-        logger.exception("Falha fatal na aplicação")
+        logger.exception("Falha fatal na aplicação Mephisto")
         sys.exit(1)
