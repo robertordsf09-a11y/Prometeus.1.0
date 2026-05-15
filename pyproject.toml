@@ -1,0 +1,23 @@
+[project]
+name = "prometeu"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "brazilfiscalreport>=0.7.2",
+    "customtkinter>=5.2.2",
+    "msoffcrypto-tool>=6.0.0",
+    "opencv-python>=4.13.0.92",
+    "openpyxl>=3.1.5",
+    "pandas>=3.0.2",
+    "pillow>=12.2.0",
+    "pyautogui>=0.9.54",
+    "pyperclip>=1.11.0",
+    "qrcode[pil]>=8.2",
+]
+
+[tool.uv.workspace]
+members = [
+    "Encript",
+]
