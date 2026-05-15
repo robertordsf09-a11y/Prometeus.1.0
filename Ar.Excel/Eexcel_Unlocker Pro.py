@@ -109,11 +109,15 @@ AZUL_PREMIUM = "#0A84FF"
 def criar_logger(nome_modulo: str, usuario: str = "sistema") -> logging.Logger:
     """
     Cria logger configurado com formato padrão e rotação de arquivo.
+    Salva logs em PROMETEUS_ROOT_DIR/logs/aplicacao.log quando chamado via Prometeus.
     """
-    formato = f"[%(asctime)s],[{usuario}],[{nome_modulo}] %(levelname)s: %(message)s"
+    usuario_real = os.environ.get("PROMETEUS_USER", usuario)
+    dir_base = os.environ.get("PROMETEUS_ROOT_DIR", BASE_DIR)
+    
+    formato = f"[%(asctime)s],[{usuario_real}],[{nome_modulo}] %(levelname)s: %(message)s"
     formatador = logging.Formatter(formato, datefmt="%Y-%m-%d %H:%M:%S")
 
-    caminho_log = os.path.join(BASE_DIR, "logs", f"excel_unlocker_{datetime.now().strftime('%Y%m%d')}.log")
+    caminho_log = os.path.join(dir_base, "logs", "aplicacao.log")
     os.makedirs(os.path.dirname(caminho_log), exist_ok=True)
 
     handler_arquivo = RotatingFileHandler(
@@ -124,12 +128,14 @@ def criar_logger(nome_modulo: str, usuario: str = "sistema") -> logging.Logger:
     handler_console = logging.StreamHandler()
     handler_console.setFormatter(formatador)
 
-    log_inst = logging.getLogger(nome_modulo)
-    log_inst.setLevel(logging.INFO)
-    log_inst.handlers.clear()
-    log_inst.addHandler(handler_arquivo)
-    log_inst.addHandler(handler_console)
-    return log_inst
+    logger_inst = logging.getLogger(nome_modulo)
+    logger_inst.setLevel(logging.INFO)
+    
+    if not logger_inst.handlers:
+        logger_inst.addHandler(handler_arquivo)
+        logger_inst.addHandler(handler_console)
+        
+    return logger_inst
 
 logger = criar_logger("ExcelUnlocker")
 
@@ -1812,5 +1818,22 @@ def main() -> None:
 
     logger.info(f"{APP_TITLE} — encerrado")
 
+def validar_execucao_segura() -> None:
+    import os
+    import sys
+    token = os.environ.get("PROMETEUS_AUTH_TOKEN")
+    if token != "PR0M3T3U5_L0CK_2026":
+        from tkinter import messagebox
+        import customtkinter as ctk
+        root = ctk.CTk()
+        root.withdraw()
+        messagebox.showerror(
+            "Acesso Negado",
+            "Este módulo não pode ser executado isoladamente.\n\n"
+            "Por favor, inicie o sistema através do painel principal (Prometeus) e realize o login."
+        )
+        sys.exit(1)
+
 if __name__ == "__main__":
+    validar_execucao_segura()
     main()

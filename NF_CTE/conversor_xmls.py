@@ -49,11 +49,17 @@ def obter_diretorio_base() -> str:
 BASE_DIR: str = obter_diretorio_base()
 
 def criar_logger(nome_modulo: str, usuario: str = "sistema") -> logging.Logger:
-    """Cria logger configurado com formato padrão e rotação de arquivo."""
-    formato = f"[%(asctime)s],[{usuario}],[{nome_modulo}] %(levelname)s: %(message)s"
+    """
+    Cria logger configurado com formato padrão e rotação de arquivo.
+    Salva logs em PROMETEUS_ROOT_DIR/logs/aplicacao.log quando chamado via Prometeus.
+    """
+    usuario_real = os.environ.get("PROMETEUS_USER", usuario)
+    dir_base = os.environ.get("PROMETEUS_ROOT_DIR", BASE_DIR)
+    
+    formato = f"[%(asctime)s],[{usuario_real}],[{nome_modulo}] %(levelname)s: %(message)s"
     formatador = logging.Formatter(formato, datefmt="%Y-%m-%d %H:%M:%S")
 
-    caminho_log = os.path.join(BASE_DIR, "logs", "conversor_xmls.log")
+    caminho_log = os.path.join(dir_base, "logs", "aplicacao.log")
     os.makedirs(os.path.dirname(caminho_log), exist_ok=True)
 
     handler_arquivo = RotatingFileHandler(
@@ -70,6 +76,7 @@ def criar_logger(nome_modulo: str, usuario: str = "sistema") -> logging.Logger:
     if not logger_inst.handlers:
         logger_inst.addHandler(handler_arquivo)
         logger_inst.addHandler(handler_console)
+        
     return logger_inst
 
 logger: logging.Logger = criar_logger("conversor_xmls")
@@ -867,6 +874,23 @@ class AppConversorXML(ctk.CTk):
             self._log_thread_safe(f"ERRO FATAL: {e}", "error")
             self._fila_ui.put({"acao": "fim", "sucesso": False, "msg_final": f"Erro crítico na conversão:\n{e}"})
 
+def validar_execucao_segura() -> None:
+    import os
+    import sys
+    token = os.environ.get("PROMETEUS_AUTH_TOKEN")
+    if token != "PR0M3T3U5_L0CK_2026":
+        from tkinter import messagebox
+        import customtkinter as ctk
+        root = ctk.CTk()
+        root.withdraw()
+        messagebox.showerror(
+            "Acesso Negado",
+            "Este módulo não pode ser executado isoladamente.\n\n"
+            "Por favor, inicie o sistema através do painel principal (Prometeus) e realize o login."
+        )
+        sys.exit(1)
+
 if __name__ == "__main__":
+    validar_execucao_segura()
     app = AppConversorXML()
     app.mainloop()

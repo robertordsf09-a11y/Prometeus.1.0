@@ -56,11 +56,15 @@ EXTENSOES_EXCEL = {".xlsx", ".xlsm", ".xls", ".xlsb"}
 def criar_logger(nome_modulo: str, usuario: str = "sistema", caminho_log_especifico: str | None = None) -> logging.Logger:
     """
     Cria logger configurado com formato padrão e rotação de arquivo.
+    Salva logs em PROMETEUS_ROOT_DIR/logs/aplicacao.log quando chamado via Prometeus.
     """
-    formato = f"[%(asctime)s],[{usuario}],[{nome_modulo}] %(levelname)s: %(message)s"
+    usuario_real = os.environ.get("PROMETEUS_USER", usuario)
+    dir_base = os.environ.get("PROMETEUS_ROOT_DIR", BASE_DIR)
+    
+    formato = f"[%(asctime)s],[{usuario_real}],[{nome_modulo}] %(levelname)s: %(message)s"
     formatador = logging.Formatter(formato, datefmt="%Y-%m-%d %H:%M:%S")
 
-    caminho_log = caminho_log_especifico if caminho_log_especifico else os.path.join(BASE_DIR, "logs", "excel_protector.log")
+    caminho_log = caminho_log_especifico if caminho_log_especifico else os.path.join(dir_base, "logs", "excel_protector.log")
     os.makedirs(os.path.dirname(caminho_log), exist_ok=True)
 
     handler_arquivo = RotatingFileHandler(
@@ -460,6 +464,23 @@ class App(ctk.CTk):
             self._fila_ui.put({"acao": "processamento_concluido", "texto": "Erro crítico no processamento"})
 
 
+def validar_execucao_segura() -> None:
+    import os
+    import sys
+    token = os.environ.get("PROMETEUS_AUTH_TOKEN")
+    if token != "PR0M3T3U5_L0CK_2026":
+        from tkinter import messagebox
+        import customtkinter as ctk
+        root = ctk.CTk()
+        root.withdraw()
+        messagebox.showerror(
+            "Acesso Negado",
+            "Este módulo não pode ser executado isoladamente.\n\n"
+            "Por favor, inicie o sistema através do painel principal (Prometeus) e realize o login."
+        )
+        sys.exit(1)
+
 if __name__ == "__main__":
+    validar_execucao_segura()
     app = App()
     app.mainloop()

@@ -35,14 +35,15 @@ BASE_DIR: str = obter_diretorio_base()
 def criar_logger(nome_modulo: str, usuario: str = "sistema") -> logging.Logger:
     """
     Cria logger configurado com formato padrão e rotação de arquivo.
-
-    Salva logs em BASE_DIR/logs/aplicacao.log com rotação a cada 5 MB,
-    mantendo até 3 arquivos históricos.
+    Salva logs em PROMETEUS_ROOT_DIR/logs/aplicacao.log quando chamado via Prometeus.
     """
-    formato = f"[%(asctime)s],[{usuario}],[{nome_modulo}] %(levelname)s: %(message)s"
+    usuario_real = os.environ.get("PROMETEUS_USER", usuario)
+    dir_base = os.environ.get("PROMETEUS_ROOT_DIR", BASE_DIR)
+    
+    formato = f"[%(asctime)s],[{usuario_real}],[{nome_modulo}] %(levelname)s: %(message)s"
     formatador = logging.Formatter(formato, datefmt="%Y-%m-%d %H:%M:%S")
 
-    caminho_log = os.path.join(BASE_DIR, "logs", "aplicacao.log")
+    caminho_log = os.path.join(dir_base, "logs", "aplicacao.log")
     os.makedirs(os.path.dirname(caminho_log), exist_ok=True)
 
     handler_arquivo = RotatingFileHandler(
@@ -53,11 +54,14 @@ def criar_logger(nome_modulo: str, usuario: str = "sistema") -> logging.Logger:
     handler_console = logging.StreamHandler()
     handler_console.setFormatter(formatador)
 
-    logger = logging.getLogger(nome_modulo)
-    logger.setLevel(logging.INFO)
-    logger.addHandler(handler_arquivo)
-    logger.addHandler(handler_console)
-    return logger
+    logger_inst = logging.getLogger(nome_modulo)
+    logger_inst.setLevel(logging.INFO)
+    
+    if not logger_inst.handlers:
+        logger_inst.addHandler(handler_arquivo)
+        logger_inst.addHandler(handler_console)
+        
+    return logger_inst
 
 
 LOGGER = criar_logger("principal")
@@ -458,7 +462,9 @@ class GerenciadorDeAplicacoes(ctk.CTk):
                     self.nos_arvore.append(no_sub)
                     container = no_sub.container_filhos
                 
-                scripts = sorted([f for f in files if f.endswith(".py") and f != "main.py"])
+                is_frozen = getattr(sys, "frozen", False)
+                extensoes_alvo = (".exe",) if is_frozen else (".py",)
+                scripts = sorted([f for f in files if f.endswith(extensoes_alvo) and not f.startswith("main")])
                 for script in scripts:
                     item = ItemDeScript(
                         container, script, os.path.join(root, script), self._executar_async
@@ -492,7 +498,16 @@ class GerenciadorDeAplicacoes(ctk.CTk):
         LOGGER.info(f"Iniciando script: {nome}")
         try:
             # Executa em processo separado para não travar a aplicação pai
-            subprocess.Popen([sys.executable, caminho], cwd=os.path.dirname(caminho))
+            env = os.environ.copy()
+            env["PROMETEUS_USER"] = self.usuario_atual or "sistema"
+            env["PROMETEUS_ROOT_DIR"] = BASE_DIR
+            env["PROMETEUS_AUTH_TOKEN"] = "PR0M3T3U5_L0CK_2026"  # Token de segurança para sub-módulos
+            if getattr(sys, "frozen", False) and caminho.endswith(".exe"):
+                cmd = [caminho]
+            else:
+                cmd = [sys.executable, caminho]
+                
+            subprocess.Popen(cmd, cwd=os.path.dirname(caminho), env=env)
         except Exception:
             LOGGER.exception(f"Falha crítica na execução de {nome}")
             self.after(0, lambda: self._notificar_erro(f"Não foi possível abrir o script: {nome}"))
@@ -505,7 +520,7 @@ class GerenciadorDeAplicacoes(ctk.CTk):
 
 def validar_licenca() -> bool:
     """Verifica validade temporal do software."""
-    data_limite_str = "01/06/2026"
+    data_limite_str = "15/01/2027"
     try:
         data_limite = datetime.strptime(data_limite_str, "%d/%m/%Y").date()
         if datetime.now().date() <= data_limite:
