@@ -1,5 +1,7 @@
 
 ---
+# Sempre responda aos comandos, explicações e comentários de código em português do Brasil.
+---
 
 # Diretrizes de Desenvolvimento — Engenharia de Software Python
 
@@ -44,6 +46,9 @@ Qualquer bloco de código repetido em dois ou mais lugares deve ser extraído pa
 ## Portabilidade e Compatibilidade com Nuitka
 
 O código deve funcionar tanto ao ser executado diretamente na IDE quanto após compilação via **Nuitka**.
+
+- Exemplo de comando para compilação nuitika:
+     Ran command: `uv run python -m nuitka --standalone --onefile --disable-console --plugin-enable=tk-inter --include-package-data=customtkinter --windows-icon-from-ico=gothic.ico --windows-uac-admin --output-dir=build main.py`
 
 ### Regra de Caminhos
 Use sempre o seguinte padrão para localizar o diretório raiz em tempo de execução:
@@ -108,6 +113,9 @@ O arquivo de log deve ser salvo **sempre no mesmo diretório do código ou execu
 
 ## Interface (UI/UX)
 
+### Estética: **Apple / fluida e minimalista**
+ — minimalismo, hierarquia visual clara cantos arredondados e transições suaves
+
 ### Framework
 Use exclusivamente **CustomTkinter**, herdando de `customtkinter.CTk`.
 
@@ -115,11 +123,30 @@ Use exclusivamente **CustomTkinter**, herdando de `customtkinter.CTk`.
 ```python
 ctk.set_appearance_mode("system")
 ctk.set_default_color_theme("blue")
-self.geometry("450x600")
+self.geometry("450x600") # Obrigatoriamente
 self.resizable(False, False)
 ```
 ## Paleta de Cores
-- Paleta de cores conforme o arquivo `Paleta.md`
+
+#0A0A0A — Fundo principal da aplicação — Preto Profundo
+#1C1C1C — Cards, modais e superfícies elevadas — Preto Secundário
+#2A2A2A — Bordas, divisores e separadores — Cinza Escuro
+#3A3A3A — Bordas sutis, hover de cards e inputs — Cinza Médio
+#8C8C8C — Textos secundários, legendas e placeholders — Cinza Secundário
+#BEBEBE — Textos principais — Cinza Primário
+#EDEDED — Textos em fundos escuros (alta legibilidade) — Branco Suave
+#D4AF37 — Títulos importantes, ícones premium e destaques — Ouro Principal
+#B8972E — Sombras e estados pressionados do ouro — Ouro Escuro
+#006D4E — Áreas grandes de destaque e sidebars — Esmeralda Deep
+#00A36C — Botões primários, links e destaques principais — Esmeralda Brilhante
+#00C17C — Sucesso e feedback positivo — Esmeralda Success
+#C8102E — Erros, botões de delete e alertas — Vermelho Metálico
+#8B0000 — Estados perigosos fortes — Vermelho Sangue
+#FFB800 — Avisos e alertas de atenção — Amarelo Dourado
+
+## Icones
+- Nunca use icons de contorno.
+- Sempre use apenas icones solidos, se preciso importe uma biblioteca para isso.
 
 ### Layout
 - Grid responsivo com `weight=1` em linhas e colunas.

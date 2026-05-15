@@ -1,532 +1,527 @@
-import os
-import sys
-import math
+from __future__ import annotations
+
 import logging
+import os
 import subprocess
+import sys
+import threading
 from datetime import datetime
-import tkinter as tk
-from tkinter import messagebox
+from logging.handlers import RotatingFileHandler
+from typing import Any, Callable
+
 import customtkinter as ctk
-from PIL import Image, ImageDraw
-
-
-# =============================================================================
-# LOGGING
-# =============================================================================
-logging.basicConfig(
-    level=logging.INFO,
-    format="[%(asctime)s] %(levelname)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[
-        logging.FileHandler("app.log", encoding="utf-8"),
-        logging.StreamHandler(sys.stdout),
-    ],
-)
-
+from PIL import Image
 
 # =============================================================================
-# PALETA — macOS Sonoma Light/Dark adaptável
+# CONFIGURAÇÃO DE AMBIENTE E CAMINHOS
 # =============================================================================
-COLORS = {
-    # Fundos
-    "bg_window": ("#F2F2F7", "#1C1C1E"),
-    "bg_sidebar": ("#FFFFFF", "#2C2C2E"),
-    "bg_header": ("#F2F2F7", "#1C1C1E"),
-    "bg_item_hover": ("#E5E5EA", "#3A3A3C"),
-    "bg_folder_root": ("#FFFFFF", "#2C2C2E"),
-    # Botão de script (pill colorido)
-    "pill_bg": ("#E8F0FE", "#1C3358"),
-    "pill_bg_hover": ("#C7D9FC", "#2C4A7A"),
-    "pill_fg": ("#1A56DB", "#6EA8FE"),
-    # Textos
-    "text_primary": ("#1C1C1E", "#F2F2F7"),
-    "text_secondary": ("#6E6E73", "#8E8E93"),
-    "text_folder": ("#3A3A3C", "#EBEBF5"),
-    # Separador / borda
-    "separator": ("#D1D1D6", "#38383A"),
-    # Botão chevron
-    "chevron": ("#8E8E93", "#636366"),
-    # Acento (azul Apple)
-    "accent": "#0A84FF",
-    "accent_dark": "#0066CC",
-}
 
-FONT_TITLE = ("SF Pro Display", "Helvetica Neue", "Arial")
-FONT_BODY = ("SF Pro Text", "Helvetica Neue", "Arial")
-
-
-def _font(family_list, size, weight="normal"):
-    for f in family_list:
-        try:
-            t = ctk.CTkFont(family=f, size=size, weight=weight)
-            return t
-        except Exception:
-            continue
-    return ctk.CTkFont(size=size, weight=weight)
-
-
-# =============================================================================
-# LICENSE
-# =============================================================================
-class LicenseManager:
-    @staticmethod
-    def verificar_licenca():
-        data_expiracao_str = "01/06/2026"
-        try:
-            data_expiracao = datetime.strptime(data_expiracao_str, "%d/%m/%Y").date()
-            if datetime.now().date() <= data_expiracao:
-                return True
-            LicenseManager._alerta(data_expiracao_str)
-            return False
-        except Exception as e:
-            logging.error(f"Erro na validação de licença: {e}")
-            return False
-
-    @staticmethod
-    def _alerta(data):
-        root = tk.Tk()
-        root.withdraw()
-        messagebox.showwarning("Licença Expirada", f"Acesso encerrado em {data}.")
-        root.destroy()
-        sys.exit(0)
-
-
-# =============================================================================
-# ICON FACTORY — gear sólido via PIL, adaptado a light/dark
-# =============================================================================
-class IconFactory:
+def obter_diretorio_base() -> str:
     """
-    Gera ícones vetoriais renderizados com PIL.
-    Retorna CTkImage (light + dark) pronto para usar em CTkButton/CTkLabel.
+    Retorna o diretório raiz da aplicação.
+
+    Compatível com execução direta (.py) e executável compilado via Nuitka.
+    Nunca use __file__ diretamente fora desta função.
+    """
+    if getattr(sys, "frozen", False):
+        # Contexto: executável gerado pelo Nuitka
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+BASE_DIR: str = obter_diretorio_base()
+
+
+def criar_logger(nome_modulo: str, usuario: str = "sistema") -> logging.Logger:
+    """
+    Cria logger configurado com formato padrão e rotação de arquivo.
+
+    Salva logs em BASE_DIR/logs/aplicacao.log com rotação a cada 5 MB,
+    mantendo até 3 arquivos históricos.
+    """
+    formato = f"[%(asctime)s],[{usuario}],[{nome_modulo}] %(levelname)s: %(message)s"
+    formatador = logging.Formatter(formato, datefmt="%Y-%m-%d %H:%M:%S")
+
+    caminho_log = os.path.join(BASE_DIR, "logs", "aplicacao.log")
+    os.makedirs(os.path.dirname(caminho_log), exist_ok=True)
+
+    handler_arquivo = RotatingFileHandler(
+        caminho_log, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+    )
+    handler_arquivo.setFormatter(formatador)
+
+    handler_console = logging.StreamHandler()
+    handler_console.setFormatter(formatador)
+
+    logger = logging.getLogger(nome_modulo)
+    logger.setLevel(logging.INFO)
+    logger.addHandler(handler_arquivo)
+    logger.addHandler(handler_console)
+    return logger
+
+
+LOGGER = criar_logger("principal")
+
+# =============================================================================
+# CONSTANTES DE DESIGN (PALETA PREMIUM)
+# =============================================================================
+
+FUNDO_PRINCIPAL = "#0A0A0A"
+SUPERFICIE = "#1C1C1C"
+BORDA_FORTE = "#2A2A2A"
+BORDA_SUTIL = "#3A3A3A"
+TEXTO_SECUNDARIO = "#8C8C8C"
+TEXTO_PRIMARIO = "#BEBEBE"
+TEXTO_DESTAQUE = "#EDEDED"
+OURO_PRINCIPAL = "#D4AF37"
+OURO_ESCURO = "#B8972E"
+ESMERALDA_DEEP = "#006D4E"
+ESMERALDA_PRIMARIA = "#00A36C"
+ESMERALDA_SUCESSO = "#00C17C"
+ERRO = "#C8102E"
+PERIGO = "#8B0000"
+AVISO = "#FFB800"
+
+# =============================================================================
+# COMPONENTES DE INTERFACE
+# =============================================================================
+
+class ItemDeScript(ctk.CTkFrame):
+    """
+    Representa um script individual na lista, com botão de execução.
     """
 
-    @staticmethod
-    def _draw_gear(size: int, fg: str, bg: str) -> Image.Image:
-        """
-        Desenha um gear sólido num canvas RGBA de `size` × `size` px.
-        Usa supersampling 4× para bordas suaves e depois reduz.
-        """
-        S = size * 4  # supersampling 4×
-        cx = cy = S // 2
-        r_outer = S * 0.42  # raio externo dos dentes
-        r_inner = S * 0.28  # base dos dentes
-        r_hub = S * 0.14  # buraco central
-        n_teeth = 8
-        tooth_w = 0.30  # largura angular do dente (rad fração)
-
-        img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(img)
-
-        # ── corpo do gear (polígono com dentes) ──────────────────────────────
-        pts = []
-        step = math.tau / n_teeth
-        for i in range(n_teeth):
-            base = step * i
-            # flanco esquerdo da base
-            a0 = base - step * 0.22
-            pts.append((cx + r_inner * math.cos(a0), cy + r_inner * math.sin(a0)))
-            # sobe ao dente
-            a1 = base - step * tooth_w
-            pts.append((cx + r_outer * math.cos(a1), cy + r_outer * math.sin(a1)))
-            # topo do dente
-            a2 = base + step * tooth_w
-            pts.append((cx + r_outer * math.cos(a2), cy + r_outer * math.sin(a2)))
-            # desce da base
-            a3 = base + step * 0.22
-            pts.append((cx + r_inner * math.cos(a3), cy + r_inner * math.sin(a3)))
-
-        draw.polygon(pts, fill=fg)
-
-        # ── buraco central (RGBA punch-through) ─────────────────────────────
-        cx_f = cy_f = S / 2
-        draw.ellipse(
-            (cx_f - r_hub, cy_f - r_hub, cx_f + r_hub, cy_f + r_hub),
-            fill=(0, 0, 0, 0),
-        )
-
-        # reduz para tamanho final com antialiasing
-        return img.resize((size, size), Image.LANCZOS)
-
-    @staticmethod
-    def _hex_to_rgba(h: str) -> tuple:
-        h = h.lstrip("#")
-        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
-        return (r, g, b, 255)
-
-    @classmethod
-    def gear(
-        cls, size: int = 18, fg_light: str = "#1A56DB", fg_dark: str = "#6EA8FE"
-    ) -> ctk.CTkImage:
-        """
-        Retorna CTkImage com versão light e dark do gear.
-        O fundo é sempre transparente — combina com qualquer bg de botão.
-        """
-        # Converte hex → RGBA para PIL
-        light_img = cls._draw_gear(size, cls._hex_to_rgba(fg_light), None)
-        dark_img = cls._draw_gear(size, cls._hex_to_rgba(fg_dark), None)
-        return ctk.CTkImage(
-            light_image=light_img, dark_image=dark_img, size=(size, size)
-        )
-
-    # Cache de instância — evita recriar a mesma imagem a cada ScriptItem
-    _cache: dict = {}
-
-    @classmethod
-    def get(cls, key: str = "gear", **kwargs) -> ctk.CTkImage:
-        if key not in cls._cache:
-            cls._cache[key] = cls.gear(**kwargs)
-        return cls._cache[key]
-
-
-# =============================================================================
-# SCRIPT ITEM — pill colorido, compacto
-# =============================================================================
-class ScriptItem(ctk.CTkFrame):
-    def __init__(self, master, nome, caminho, nivel=0, on_run=None, **kwargs):
+    def __init__(
+        self,
+        master: Any,
+        nome_arquivo: str,
+        caminho_completo: str,
+        ao_executar: Callable[[str, str], None],
+        **kwargs: Any,
+    ) -> None:
         super().__init__(master, fg_color="transparent", **kwargs)
+        self.caminho_completo = caminho_completo
+        self.nome_arquivo = nome_arquivo
+        self.ao_executar = ao_executar
+
+        self._configurar_layout()
+
+    def _configurar_layout(self) -> None:
+        """Configura a estrutura visual do item."""
         self.grid_columnconfigure(0, weight=1)
 
-        indent = nivel * 16
-
-        # Container do pill
-        row = ctk.CTkFrame(self, fg_color="transparent")
-        row.grid(row=0, column=0, sticky="ew", padx=(indent + 8, 8), pady=1)
-        row.grid_columnconfigure(0, weight=1)
-
-        label_nome = nome[:-3] if nome.endswith(".py") else nome  # remove .py do label
-
-        # Ícone gear sólido (PIL) — light #1A56DB / dark #6EA8FE
-        _icon = IconFactory.get(
-            "gear",
-            size=15,
-            fg_light=COLORS["pill_fg"][0],
-            fg_dark=COLORS["pill_fg"][1],
+        self.container = ctk.CTkFrame(
+            self, fg_color=SUPERFICIE, corner_radius=14, border_width=1, border_color=BORDA_FORTE
         )
-
-        self.btn = ctk.CTkButton(
-            row,
-            text=f" {label_nome}",
-            image=_icon,
-            compound="left",  # ícone à esquerda do texto
-            anchor="w",
-            height=28,
-            corner_radius=7,
-            border_width=0,
-            fg_color=COLORS["pill_bg"],
-            hover_color=COLORS["pill_bg_hover"],
-            text_color=COLORS["pill_fg"],
-            font=_font(FONT_BODY, 12),
-            command=lambda: on_run(caminho, nome) if on_run else None,
-        )
-        self.btn.grid(row=0, column=0, sticky="ew")
-
-
-# =============================================================================
-# FOLDER NODE — colapsável, estilo Finder sidebar
-# =============================================================================
-class FolderNode(ctk.CTkFrame):
-    def __init__(self, master, nome, nivel=0, **kwargs):
-        super().__init__(master, fg_color="transparent", **kwargs)
-        self.nivel = nivel
-        self.expanded = True
-        self.grid_columnconfigure(0, weight=1)
-
-        indent = nivel * 16
-
-        # ── Cabeçalho da pasta ──────────────────────────────────────────────
-        self.header_row = ctk.CTkFrame(
-            self,
-            fg_color=COLORS["bg_folder_root"] if nivel == 0 else "transparent",
-            corner_radius=8 if nivel == 0 else 0,
-        )
-        self.header_row.grid(
-            row=0,
-            column=0,
-            sticky="ew",
-            padx=(indent, 8) if nivel > 0 else (8, 8),
-            pady=(4, 0) if nivel == 0 else (2, 0),
-        )
-        self.header_row.grid_columnconfigure(1, weight=1)
-
-        # Chevron
-        self.lbl_chevron = ctk.CTkLabel(
-            self.header_row,
-            text="▾",
-            width=18,
-            font=_font(FONT_BODY, 11),
-            text_color=COLORS["chevron"],
-            cursor="hand2",
-        )
-        self.lbl_chevron.grid(row=0, column=0, padx=(8, 2), pady=4)
-        self.lbl_chevron.bind("<Button-1>", lambda e: self.toggle())
-
-        # Ícone + nome
-        icon = "📂" if nivel == 0 else "📁"
-        self.lbl_nome = ctk.CTkLabel(
-            self.header_row,
-            text=f"{icon}  {nome}",
-            anchor="w",
-            font=_font(FONT_BODY, 12, "bold") if nivel == 0 else _font(FONT_BODY, 11),
-            text_color=COLORS["text_folder"],
-            cursor="hand2",
-        )
-        self.lbl_nome.grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=4)
-        self.lbl_nome.bind("<Button-1>", lambda e: self.toggle())
-
-        # Contador (populado depois)
-        self.lbl_count = ctk.CTkLabel(
-            self.header_row,
-            text="",
-            width=28,
-            font=_font(FONT_BODY, 10),
-            text_color=COLORS["text_secondary"],
-        )
-        self.lbl_count.grid(row=0, column=2, padx=(0, 8))
-
-        # Separador sutil abaixo do cabeçalho raiz
-        if nivel == 0:
-            sep = ctk.CTkFrame(self, fg_color=COLORS["separator"], height=1)
-            sep.grid(row=1, column=0, sticky="ew", padx=16, pady=(2, 0))
-
-        # ── Container de conteúdo ────────────────────────────────────────────
-        self.container = ctk.CTkFrame(self, fg_color="transparent")
-        self.container.grid(row=2, column=0, sticky="ew", padx=0, pady=(0, 4))
+        self.container.grid(row=0, column=0, sticky="ew", padx=12, pady=6)
         self.container.grid_columnconfigure(0, weight=1)
 
-        self._script_count = 0
+        self.lbl_nome = ctk.CTkLabel(
+            self.container,
+            text=f"  📄  {self.nome_arquivo}",
+            text_color=TEXTO_PRIMARIO,
+            font=ctk.CTkFont(size=13),
+            anchor="w",
+        )
+        self.lbl_nome.grid(row=0, column=0, sticky="w", padx=15, pady=12)
 
-    # ── Colapsar / Expandir ─────────────────────────────────────────────────
-    def toggle(self):
-        self.expanded = not self.expanded
-        if self.expanded:
-            self.container.grid()
-            self.lbl_chevron.configure(text="▾")
+        self.btn_rodar = ctk.CTkButton(
+            self.container,
+            text="Iniciar",
+            width=80,
+            height=30,
+            fg_color=ESMERALDA_PRIMARIA,
+            hover_color=ESMERALDA_SUCESSO,
+            text_color=FUNDO_PRINCIPAL,
+            corner_radius=10,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=lambda: self.ao_executar(self.caminho_completo, self.nome_arquivo),
+        )
+        self.btn_rodar.grid(row=0, column=1, padx=15, pady=12)
+
+
+class NoDePasta(ctk.CTkFrame):
+    """
+    Representa uma pasta colapsável na árvore de arquivos.
+    """
+
+    def __init__(self, master: Any, nome: str, nivel: int = 0, **kwargs: Any) -> None:
+        super().__init__(master, fg_color="transparent", **kwargs)
+        self.nivel = nivel
+        self.expandido = False  # Iniciar recolhido
+        self.grid_columnconfigure(0, weight=1)
+
+        self._configurar_cabecalho(nome)
+        self._configurar_container_conteudo()
+
+        # Iniciar no estado recolhido
+        self.container_filhos.grid_remove()
+        self.btn_toggle.configure(text="▸")
+
+    def _configurar_cabecalho(self, nome: str) -> None:
+        """Configura a linha de cabeçalho da pasta."""
+        indentacao = self.nivel * 18
+        bg_header = SUPERFICIE if self.nivel == 0 else "transparent"
+        
+        self.header = ctk.CTkFrame(
+            self, fg_color=bg_header, corner_radius=12 if self.nivel == 0 else 0
+        )
+        self.header.grid(
+            row=0, column=0, sticky="ew", padx=(indentacao + 10, 10), pady=(8 if self.nivel == 0 else 2, 0)
+        )
+        self.header.grid_columnconfigure(1, weight=1)
+
+        self.btn_toggle = ctk.CTkButton(
+            self.header,
+            text="▾",
+            width=28,
+            height=28,
+            fg_color="transparent",
+            text_color=TEXTO_SECUNDARIO,
+            hover_color=BORDA_SUTIL,
+            command=self.alternar,
+        )
+        self.btn_toggle.grid(row=0, column=0, padx=5, pady=5)
+
+        icone = "📂" if self.nivel == 0 else "📁"
+        cor_texto = OURO_PRINCIPAL if self.nivel == 0 else TEXTO_PRIMARIO
+        peso_fonte = "bold" if self.nivel == 0 else "normal"
+
+        self.lbl_nome = ctk.CTkLabel(
+            self.header,
+            text=f"{icone}  {nome}",
+            text_color=cor_texto,
+            font=ctk.CTkFont(size=14, weight=peso_fonte),
+        )
+        self.lbl_nome.grid(row=0, column=1, sticky="w", padx=5, pady=5)
+
+        self.lbl_qtd = ctk.CTkLabel(self.header, text="", text_color=TEXTO_SECUNDARIO, font=ctk.CTkFont(size=11))
+        self.lbl_qtd.grid(row=0, column=2, padx=15)
+
+    def _configurar_container_conteudo(self) -> None:
+        """Cria o container para os itens filhos."""
+        self.container_filhos = ctk.CTkFrame(self, fg_color="transparent")
+        self.container_filhos.grid(row=1, column=0, sticky="ew")
+        self.container_filhos.grid_columnconfigure(0, weight=1)
+
+    def alternar(self) -> None:
+        """Alterna entre expandido e colapsado."""
+        self.expandido = not self.expandido
+        if self.expandido:
+            self.container_filhos.grid()
+            self.btn_toggle.configure(text="▾")
         else:
-            self.container.grid_remove()
-            self.lbl_chevron.configure(text="▸")
+            self.container_filhos.grid_remove()
+            self.btn_toggle.configure(text="▸")
 
-    def set_count(self, n):
-        self._script_count = n
-        if n > 0:
-            self.lbl_count.configure(text=f"{n}")
+    def atualizar_contagem(self, total: int) -> None:
+        """Define o texto de contagem de itens."""
+        if total > 0:
+            self.lbl_qtd.configure(text=f"{total} itens")
+
+    def definir_estado(self, expandir: bool) -> None:
+        """Força um estado específico de expansão."""
+        if self.expandido != expandir:
+            self.alternar()
 
 
 # =============================================================================
-# APP PRINCIPAL
+# JANELA PRINCIPAL
 # =============================================================================
-class LauncherApp(ctk.CTk):
-    def __init__(self):
+
+class GerenciadorDeAplicacoes(ctk.CTk):
+    """
+    Aplicação principal para gestão e execução de automações ERP.
+    """
+
+    def __init__(self) -> None:
         super().__init__()
 
-        self.title("Prometeus Ecosystem")
-        self.geometry("560x760")
-        self.minsize(480, 480)
-        ctk.set_appearance_mode("System")
+        self.title("Prometeus System - ERP Automation")
+        self.geometry("450x600")
+        self.resizable(False, False)
+        
+        ctk.set_appearance_mode("system")
         ctk.set_default_color_theme("blue")
+        self.configure(fg_color=FUNDO_PRINCIPAL)
 
-        self.diretorio_base = os.path.dirname(os.path.abspath(__file__))
-        self.target_folders = ["App.Gemco", "Ar.Excel", "NF_CTE", "Utilitários"]
+        self.usuario_atual = ""
+        self.banco_senhas = {
+            "ROBERTO": "rdsf",
+            "JOEDSON": "aragao",
+            "TAISSA": "fragas",
+            "IGOR": "suri",
+            "JADSON": "j123",
+        }
 
-        self._total_scripts = 0
+        self.pastas_alvo = ["App.Gemco", "Ar.Excel", "NF_CTE"]
+        self.nos_arvore: list[NoDePasta] = []
+        
+        self._configurar_grid_base()
+        self._exibir_tela_login()
 
-        self._setup_ui()
-        self._build_tree()
-        self._update_subtitle()
-
-    # ── UI ──────────────────────────────────────────────────────────────────
-    def _setup_ui(self):
-        self.configure(fg_color=COLORS["bg_window"])
+    def _configurar_grid_base(self) -> None:
+        """Configura a estrutura de grid da janela principal."""
+        self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(1, weight=1)
 
-        # ── Header ──────────────────────────────────────────────────────────
-        header = ctk.CTkFrame(self, fg_color="transparent")
-        header.grid(row=0, column=0, sticky="ew", padx=24, pady=(28, 0))
+        self.lbl_rodape = ctk.CTkLabel(
+            self,
+            text="Roberto Santos [LABS]©",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            text_color=OURO_PRINCIPAL,
+            fg_color=SUPERFICIE,
+            height=25
+        )
+        self.lbl_rodape.grid(row=1, column=0, sticky="ew", padx=0, pady=0)
+
+    def _exibir_tela_login(self) -> None:
+        """Renderiza a interface de autenticação."""
+        self.frame_conteudo = ctk.CTkFrame(self, fg_color="transparent")
+        self.frame_conteudo.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
+        self.frame_conteudo.grid_rowconfigure((0, 6), weight=1)
+        self.frame_conteudo.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            self.frame_conteudo,
+            text="PROMETEUS",
+            font=ctk.CTkFont(size=36, weight="bold"),
+            text_color=OURO_PRINCIPAL
+        ).grid(row=1, column=0, pady=(0, 30))
+
+        self.ent_user = self._criar_input("Usuário")
+        self.ent_user.grid(row=2, column=0, pady=12)
+
+        self.ent_pass = self._criar_input("Senha", oculto=True)
+        self.ent_pass.grid(row=3, column=0, pady=12)
+
+        self.lbl_feedback = ctk.CTkLabel(self.frame_conteudo, text="", text_color=ERRO, font=ctk.CTkFont(size=12))
+        self.lbl_feedback.grid(row=4, column=0, pady=5)
+
+        self.btn_login = ctk.CTkButton(
+            self.frame_conteudo,
+            text="Acessar Sistema",
+            command=self._processar_login,
+            fg_color=ESMERALDA_PRIMARIA,
+            hover_color=ESMERALDA_SUCESSO,
+            text_color=FUNDO_PRINCIPAL,
+            corner_radius=12,
+            height=40,
+            width=240,
+            font=ctk.CTkFont(weight="bold")
+        )
+        self.btn_login.grid(row=5, column=0, pady=20)
+
+    def _criar_input(self, placeholder: str, oculto: bool = False) -> ctk.CTkEntry:
+        """Helper para criar campos de entrada padronizados."""
+        return ctk.CTkEntry(
+            self.frame_conteudo,
+            placeholder_text=placeholder,
+            show="*" if oculto else "",
+            width=240,
+            height=40,
+            corner_radius=12,
+            fg_color=SUPERFICIE,
+            border_color=BORDA_FORTE,
+            text_color=TEXTO_PRIMARIO,
+            placeholder_text_color=TEXTO_SECUNDARIO
+        )
+
+    def _processar_login(self) -> None:
+        """
+        Valida as credenciais informadas.
+        
+        O nome de usuário é tratado como insensível a maiúsculas/minúsculas,
+        enquanto a senha mantém a sensibilidade (case-sensitive).
+        """
+        user = self.ent_user.get().strip().upper()  # Normaliza para comparação
+        pwd = self.ent_pass.get().strip()           # Mantém original para senha
+
+        if self.banco_senhas.get(user) == pwd:
+            self.usuario_atual = user
+            LOGGER.info(f"Login bem-sucedido: {user}")
+            self.frame_conteudo.destroy()
+            self._exibir_painel_controle()
+        else:
+            self.lbl_feedback.configure(text="Usuário ou senha inválidos")
+            LOGGER.warning(f"Falha de login para o usuário: {user}")
+
+    def _exibir_painel_controle(self) -> None:
+        """Renderiza a área principal de scripts."""
+        self.frame_conteudo = ctk.CTkFrame(self, fg_color="transparent")
+        self.frame_conteudo.grid(row=0, column=0, sticky="nsew", padx=15, pady=15)
+        self.frame_conteudo.grid_rowconfigure(1, weight=1)
+        self.frame_conteudo.grid_columnconfigure(0, weight=1)
+
+        # Cabeçalho do Painel
+        header = ctk.CTkFrame(self.frame_conteudo, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 15))
         header.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(
             header,
-            text="Prometeus Ecosystem",
-            font=_font(FONT_TITLE, 22, "bold"),
-            text_color=COLORS["text_primary"],
-            anchor="w",
+            text="Ecosistema de Automação",
+            font=ctk.CTkFont(size=22, weight="bold"),
+            text_color=TEXTO_DESTAQUE,
+            anchor="w"
         ).grid(row=0, column=0, sticky="w")
-
-        self.lbl_subtitle = ctk.CTkLabel(
-            header,
-            text="Carregando…",
-            font=_font(FONT_BODY, 12),
-            text_color=COLORS["text_secondary"],
-            anchor="w",
-        )
-        self.lbl_subtitle.grid(row=1, column=0, sticky="w", pady=(2, 0))
-
-        # Botão collapse all / expand all
-        ctrl_row = ctk.CTkFrame(self, fg_color="transparent")
-        ctrl_row.grid(row=0, column=0, sticky="ne", padx=24, pady=(32, 0))
-
-        self.btn_collapse_all = ctk.CTkButton(
-            ctrl_row,
-            text="Recolher tudo",
-            width=110,
-            height=26,
-            corner_radius=6,
-            font=_font(FONT_BODY, 11),
-            fg_color="transparent",
-            border_width=1,
-            border_color=COLORS["separator"],
-            text_color=COLORS["text_secondary"],
-            hover_color=COLORS["bg_item_hover"],
-            command=self._collapse_all,
-        )
-        self.btn_collapse_all.pack(side="left", padx=(0, 6))
-
-        self.btn_expand_all = ctk.CTkButton(
-            ctrl_row,
-            text="Expandir tudo",
-            width=100,
-            height=26,
-            corner_radius=6,
-            font=_font(FONT_BODY, 11),
-            fg_color="transparent",
-            border_width=1,
-            border_color=COLORS["separator"],
-            text_color=COLORS["text_secondary"],
-            hover_color=COLORS["bg_item_hover"],
-            command=self._expand_all,
-        )
-        self.btn_expand_all.pack(side="left")
-
-        # ── Linha divisória ──────────────────────────────────────────────────
-        ctk.CTkFrame(self, fg_color=COLORS["separator"], height=1).grid(
-            row=0, column=0, sticky="sew", padx=20, pady=(72, 0)
-        )
-
-        # ── Área scrollável da árvore ────────────────────────────────────────
-        self.tree_scroll = ctk.CTkScrollableFrame(
-            self,
-            fg_color=COLORS["bg_window"],
-            scrollbar_button_color=COLORS["separator"],
-            scrollbar_button_hover_color=COLORS["chevron"],
-            corner_radius=0,
-        )
-        self.tree_scroll.grid(row=1, column=0, sticky="nsew", padx=0, pady=(8, 0))
-        self.tree_scroll.grid_columnconfigure(0, weight=1)
-
-        # ── Footer ───────────────────────────────────────────────────────────
-        footer = ctk.CTkFrame(self, fg_color="transparent")
-        footer.grid(row=2, column=0, sticky="ew", padx=24, pady=(6, 14))
-        footer.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(
-            footer,
-            text="© Roberto Santos",
-            font=_font(FONT_BODY, 10),
-            text_color=COLORS["text_secondary"],
-            anchor="w",
-        ).grid(row=0, column=0, sticky="w")
+            header,
+            text=f"Operador: {self.usuario_atual}",
+            text_color=TEXTO_SECUNDARIO,
+            font=ctk.CTkFont(size=12),
+            anchor="w"
+        ).grid(row=1, column=0, sticky="w")
 
-    # ── Construção da árvore ────────────────────────────────────────────────
-    def _build_tree(self):
-        self._folder_nodes: list[FolderNode] = []
-        encontrou = False
+        # Botões de Controle Global - Movidos para uma nova linha para evitar sobreposição
+        frame_controles = ctk.CTkFrame(header, fg_color="transparent")
+        frame_controles.grid(row=2, column=0, sticky="w", pady=(12, 0))
 
-        for pasta_raiz in self.target_folders:
-            caminho_raiz = os.path.join(self.diretorio_base, pasta_raiz)
-            if not os.path.exists(caminho_raiz):
-                logging.warning(f"Diretório não encontrado: {pasta_raiz}")
-                continue
-
-            encontrou = True
-            no_raiz = FolderNode(self.tree_scroll, pasta_raiz, nivel=0)
-            no_raiz.grid(
-                row=len(self._folder_nodes), column=0, sticky="ew", padx=8, pady=(4, 0)
-            )
-            self._folder_nodes.append(no_raiz)
-
-            contagem_raiz = 0
-
-            for root, dirs, files in os.walk(caminho_raiz):
-                dirs.sort()
-                nivel_atual = root.replace(caminho_raiz, "").count(os.sep)
-
-                if root != caminho_raiz:
-                    nome_sub = os.path.basename(root)
-                    no_sub = FolderNode(
-                        no_raiz.container, nome_sub, nivel=nivel_atual + 1
-                    )
-                    no_sub.pack(fill="x", pady=0)
-                    self._folder_nodes.append(no_sub)
-                    parent_container = no_sub.container
-                else:
-                    parent_container = no_raiz.container
-
-                scripts = sorted(
-                    [f for f in files if f.endswith(".py") and f != "main.py"]
-                )
-                for f in scripts:
-                    full_path = os.path.join(root, f)
-                    item = ScriptItem(
-                        parent_container,
-                        f,
-                        full_path,
-                        nivel=nivel_atual + 1,
-                        on_run=self.executar_script,
-                    )
-                    item.pack(fill="x")
-                    contagem_raiz += 1
-                    self._total_scripts += 1
-                    logging.info(f"Script: {f} em {root}")
-
-            no_raiz.set_count(contagem_raiz)
-
-        if not encontrou:
-            ctk.CTkLabel(
-                self.tree_scroll,
-                text="Nenhuma pasta de automação encontrada.",
-                font=_font(FONT_BODY, 13),
-                text_color=COLORS["text_secondary"],
-            ).pack(pady=60)
-
-    def _update_subtitle(self):
-        n = self._total_scripts
-        s = "script" if n == 1 else "scripts"
-        f = len(self.target_folders)
-        self.lbl_subtitle.configure(
-            text=f"{n} {s} disponíve{'l' if n==1 else 'is'} em {f} módulos"
+        self.btn_recolher = ctk.CTkButton(
+            frame_controles,
+            text="Recolher Tudo",
+            width=100,
+            height=28,
+            corner_radius=10,
+            fg_color=SUPERFICIE,
+            border_width=1,
+            border_color=BORDA_FORTE,
+            text_color=TEXTO_SECUNDARIO,
+            hover_color=BORDA_SUTIL,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=self._recolher_tudo
         )
+        self.btn_recolher.grid(row=0, column=0, padx=(0, 8))
 
-    # ── Colapsar / Expandir todos ────────────────────────────────────────────
-    def _collapse_all(self):
-        for node in self._folder_nodes:
-            if node.expanded:
-                node.toggle()
+        self.btn_expandir = ctk.CTkButton(
+            frame_controles,
+            text="Mostrar Tudo",
+            width=100,
+            height=28,
+            corner_radius=10,
+            fg_color=SUPERFICIE,
+            border_width=1,
+            border_color=BORDA_FORTE,
+            text_color=TEXTO_SECUNDARIO,
+            hover_color=BORDA_SUTIL,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=self._expandir_tudo
+        )
+        self.btn_expandir.grid(row=0, column=1, padx=0)
 
-    def _expand_all(self):
-        for node in self._folder_nodes:
-            if not node.expanded:
-                node.toggle()
+        # Lista de Scripts (Scrollable)
+        self.area_scroll = ctk.CTkScrollableFrame(
+            self.frame_conteudo,
+            fg_color="transparent",
+            scrollbar_button_color=BORDA_FORTE,
+            scrollbar_button_hover_color=BORDA_SUTIL,
+            corner_radius=0
+        )
+        self.area_scroll.grid(row=1, column=0, sticky="nsew")
+        self.area_scroll.grid_columnconfigure(0, weight=1)
 
-    # ── Execução ─────────────────────────────────────────────────────────────
-    def executar_script(self, caminho, nome):
-        logging.info(f"Executando: {nome} | {caminho}")
+        self._popular_arvore_scripts()
+
+    def _popular_arvore_scripts(self) -> None:
+        """Varre os diretórios e reconstrói a árvore de scripts."""
+        for idx, nome_pasta in enumerate(self.pastas_alvo):
+            caminho = os.path.join(BASE_DIR, nome_pasta)
+            
+            # Garante existência da pasta
+            if not os.path.exists(caminho):
+                try:
+                    os.makedirs(caminho, exist_ok=True)
+                    LOGGER.info(f"Pasta criada: {nome_pasta}")
+                except OSError:
+                    LOGGER.exception(f"Erro ao criar diretório: {nome_pasta}")
+                    continue
+
+            no = NoDePasta(self.area_scroll, nome_pasta, nivel=0)
+            no.grid(row=idx, column=0, sticky="ew", pady=4)
+            self.nos_arvore.append(no)
+            
+            self._mapear_subdiretorios(caminho, no)
+
+    def _mapear_subdiretorios(self, raiz: str, no_pai: NoDePasta) -> None:
+        """Mapeia recursivamente subpastas e scripts."""
+        contador_total = 0
         try:
+            for root, dirs, files in os.walk(raiz):
+                dirs.sort()
+                sub_nivel = root.replace(raiz, "").count(os.sep)
+                
+                container = no_pai.container_filhos
+                if root != raiz:
+                    no_sub = NoDePasta(container, os.path.basename(root), nivel=sub_nivel + 1)
+                    no_sub.grid(row=contador_total, column=0, sticky="ew")
+                    self.nos_arvore.append(no_sub)
+                    container = no_sub.container_filhos
+                
+                scripts = sorted([f for f in files if f.endswith(".py") and f != "main.py"])
+                for script in scripts:
+                    item = ItemDeScript(
+                        container, script, os.path.join(root, script), self._executar_async
+                    )
+                    item.grid(row=contador_total + 500, column=0, sticky="ew")
+                    contador_total += 1
+                    
+            no_pai.atualizar_contagem(contador_total)
+        except Exception:
+            LOGGER.exception("Falha ao mapear árvore de diretórios")
+
+    def _expandir_tudo(self) -> None:
+        """Expande todos os nós da árvore."""
+        for no in self.nos_arvore:
+            no.definir_estado(True)
+
+    def _recolher_tudo(self) -> None:
+        """Recolhe todos os nós da árvore."""
+        for no in self.nos_arvore:
+            no.definir_estado(False)
+
+    def _executar_async(self, caminho: str, nome: str) -> None:
+        """Inicia a execução do script em uma thread separada."""
+        thread = threading.Thread(
+            target=self._rotina_execucao, args=(caminho, nome), daemon=True
+        )
+        thread.start()
+
+    def _rotina_execucao(self, caminho: str, nome: str) -> None:
+        """Lógica de execução externa do script."""
+        LOGGER.info(f"Iniciando script: {nome}")
+        try:
+            # Executa em processo separado para não travar a aplicação pai
             subprocess.Popen([sys.executable, caminho], cwd=os.path.dirname(caminho))
-        except Exception as e:
-            logging.error(f"Falha: {e}")
-            messagebox.showerror(
-                "Erro de Execução", f"Não foi possível abrir:\n{nome}\n\n{e}"
-            )
+        except Exception:
+            LOGGER.exception(f"Falha crítica na execução de {nome}")
+            self.after(0, lambda: self._notificar_erro(f"Não foi possível abrir o script: {nome}"))
+
+    def _notificar_erro(self, msg: str) -> None:
+        """Exibe popup de erro na thread principal."""
+        from tkinter import messagebox
+        messagebox.showerror("Erro de Automação", msg)
 
 
-# =============================================================================
-# ENTRY POINT
-# =============================================================================
+def validar_licenca() -> bool:
+    """Verifica validade temporal do software."""
+    data_limite_str = "01/06/2026"
+    try:
+        data_limite = datetime.strptime(data_limite_str, "%d/%m/%Y").date()
+        if datetime.now().date() <= data_limite:
+            return True
+        LOGGER.error("Software expirado")
+        return False
+    except Exception:
+        LOGGER.exception("Erro na validação de licença")
+        return False
+
+
 if __name__ == "__main__":
-    if LicenseManager.verificar_licenca():
+    if validar_licenca():
         try:
-            logging.info("Aplicação iniciada.")
-            app = LauncherApp()
+            LOGGER.info("Aplicação iniciada com sucesso")
+            app = GerenciadorDeAplicacoes()
             app.mainloop()
-        except Exception as e:
-            logging.critical(f"Erro fatal: {e}")
+        except Exception:
+            LOGGER.exception("Falha fatal na inicialização da aplicação")
