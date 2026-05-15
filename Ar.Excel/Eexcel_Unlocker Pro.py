@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════╗
-║         Excel Unlocker Pro  v2.0                     ║
+║         Excel Unlocker Pro  v3.0                     ║
 ║  Gerenciamento profissional de proteções Excel        ║
 ╚══════════════════════════════════════════════════════╝
 
@@ -9,35 +9,39 @@ Suporte a:
   • Proteção de planilha (sheetProtection)  – hash legado XOR 16-bit e SHA-512
   • Proteção de estrutura (workbookProtection)
   • Criptografia de arquivo (AES-256 / RC4)  via msoffcrypto-tool
+  • Quebra de senha de abertura por análise de criptografia + ataque inteligente
 
 Dependências:
-    pip install customtkinter msoffcrypto-tool openpyxl
+    pip install customtkinter msoffcrypto-tool openpyxl olefile
 """
+from __future__ import annotations
 
-# ──────────────────────────────────────────────────────────────────────────────
-#  Imports
-# ──────────────────────────────────────────────────────────────────────────────
-import customtkinter as ctk
-import tkinter as tk
-from tkinter import filedialog, messagebox
-
-import threading
-import zipfile
-import shutil
-import os
-import re
-import io
-import sys
-import struct
 import base64
 import hashlib
+import io
 import itertools
+import json
 import logging
+import os
+import queue
+import re
+import shutil
 import string
-from pathlib import Path
-from datetime import datetime
-from copy import deepcopy
+import struct
+import sys
+import threading
+import time
 import xml.etree.ElementTree as ET
+import zipfile
+from copy import deepcopy
+from datetime import datetime
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+import tkinter as tk
+from tkinter import filedialog, messagebox
+from typing import Any
+
+import customtkinter as ctk
 
 # ── Dependências opcionais ──
 try:
@@ -52,44 +56,82 @@ try:
 except ImportError:
     HAS_OPENPYXL = False
 
-# ──────────────────────────────────────────────────────────────────────────────
-#  Constantes / configuração visual
-# ──────────────────────────────────────────────────────────────────────────────
-APP_TITLE   = "Excel Unlocker Pro"
-APP_VERSION = "2.0"
-APP_W, APP_H = 820, 720
+try:
+    import olefile              # pip install olefile
+    HAS_OLEFILE = True
+except ImportError:
+    HAS_OLEFILE = False
 
-ctk.set_appearance_mode("dark")
+# ──────────────────────────────────────────────────────────────────────────────
+#  Constantes Globais
+# ──────────────────────────────────────────────────────────────────────────────
+
+def obter_diretorio_base() -> str:
+    """
+    Retorna o diretório raiz da aplicação.
+    Compatível com execução direta (.py) e executável compilado via Nuitka.
+    """
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+BASE_DIR: str = obter_diretorio_base()
+
+APP_TITLE   = "Excel Unlocker Pro"
+APP_VERSION = "3.0"
+APP_W, APP_H = 800, 600
+
+ctk.set_appearance_mode("system")
 ctk.set_default_color_theme("blue")
 
-COLORS = {
-    "bg":       "#1a1a2e",
-    "panel":    "#16213e",
-    "accent":   "#0f3460",
-    "green":    "#00b894",
-    "yellow":   "#fdcb6e",
-    "red":      "#d63031",
-    "blue":     "#74b9ff",
-    "text":     "#dfe6e9",
-    "subtext":  "#636e72",
-}
+# Paleta de Cores (Minimalismo Premium)
+FUNDO_PRINCIPAL = "#0A0A0A"
+SUPERFICIE = "#1C1C1C"
+BORDA_FORTE = "#2A2A2A"
+BORDA_SUTIL = "#3A3A3A"
+TEXTO_SECUNDARIO = "#8C8C8C"
+TEXTO_PRIMARIO = "#BEBEBE"
+TEXTO_DESTAQUE = "#EDEDED"
+OURO_PRINCIPAL = "#D4AF37"
+OURO_ESCURO = "#B8972E"
+ESMERALDA_DEEP = "#006D4E"
+ESMERALDA_PRIMARIA = "#00A36C"
+ESMERALDA_SUCESSO = "#00C17C"
+ERRO = "#C8102E"
+PERIGO = "#8B0000"
+AVISO = "#FFB800"
+AZUL_PREMIUM = "#0A84FF"
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Configuração de log
+#  Configuração de log Padrão
 # ──────────────────────────────────────────────────────────────────────────────
-LOG_DIR  = Path(__file__).resolve().parent
-LOG_FILE = LOG_DIR / f"excel_unlocker_{datetime.now().strftime('%Y%m%d')}.log"
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s [%(levelname)-8s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
-    ],
-)
-logger = logging.getLogger("ExcelUnlocker")
+def criar_logger(nome_modulo: str, usuario: str = "sistema") -> logging.Logger:
+    """
+    Cria logger configurado com formato padrão e rotação de arquivo.
+    """
+    formato = f"[%(asctime)s],[{usuario}],[{nome_modulo}] %(levelname)s: %(message)s"
+    formatador = logging.Formatter(formato, datefmt="%Y-%m-%d %H:%M:%S")
 
+    caminho_log = os.path.join(BASE_DIR, "logs", f"excel_unlocker_{datetime.now().strftime('%Y%m%d')}.log")
+    os.makedirs(os.path.dirname(caminho_log), exist_ok=True)
+
+    handler_arquivo = RotatingFileHandler(
+        caminho_log, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+    )
+    handler_arquivo.setFormatter(formatador)
+
+    handler_console = logging.StreamHandler()
+    handler_console.setFormatter(formatador)
+
+    log_inst = logging.getLogger(nome_modulo)
+    log_inst.setLevel(logging.INFO)
+    log_inst.handlers.clear()
+    log_inst.addHandler(handler_arquivo)
+    log_inst.addHandler(handler_console)
+    return log_inst
+
+logger = criar_logger("ExcelUnlocker")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Núcleo criptográfico
@@ -209,8 +251,308 @@ def _crack_modern_hash(target_b64: str, salt_b64: str,
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Processador de arquivos Excel
+#  Núcleo da Opção 4 — Análise de criptografia de arquivo + ataque inteligente
 # ══════════════════════════════════════════════════════════════════════════════
+
+# ── Constantes de tipo de criptografia ───────────────────────────────────────
+ENC_UNKNOWN  = "Desconhecido"
+ENC_XOR      = "XOR/BIFF (legado — muito fraco, <1 ms)"
+ENC_RC4_40   = "RC4 40-bit (legado — fraco)"
+ENC_RC4_128  = "RC4 128-bit (legado — moderado)"
+ENC_AES_128  = "AES-128 ECB Standard Encryption"
+ENC_AES_192  = "AES-192 ECB Standard Encryption"
+ENC_AES_256  = "AES-256 CBC Agile Encryption (PBKDF2-SHA512)"
+
+# Mapeamento AlgID → nome legível
+_ALG_MAP = {
+    0x6801: "RC4",
+    0x660E: "AES-128",
+    0x660F: "AES-192",
+    0x6610: "AES-256",
+}
+_HASH_MAP = {
+    0x8004: "SHA-1",
+    0x8003: "MD5",
+    0x8009: "SHA-256",
+    0x800C: "SHA-512",
+}
+
+
+def analyze_encryption(filepath: str | Path) -> dict:
+    """
+    Analisa o arquivo CFB (OLE) e extrai informações detalhadas sobre o
+    esquema de criptografia usado pelo Excel.
+
+    Retorna dict com chaves:
+        enc_type, major, minor, alg, hash_alg, key_bits,
+        salt_size, spin_count, provider, raw_xml (agile only)
+    """
+    info = {
+        "enc_type":   ENC_UNKNOWN,
+        "major":      0,
+        "minor":      0,
+        "alg":        "N/A",
+        "hash_alg":   "N/A",
+        "key_bits":   0,
+        "salt_size":  0,
+        "spin_count": 0,
+        "provider":   "",
+        "raw_xml":    "",
+        "error":      "",
+    }
+
+    try:
+        # ── Lê stream EncryptionInfo via olefile ─────────────────────────
+        if HAS_OLEFILE:
+            with olefile.OleFileIO(str(filepath)) as ole:
+                if not ole.exists("EncryptionInfo"):
+                    info["error"] = "Stream EncryptionInfo não encontrado"
+                    return info
+                raw = ole.openstream("EncryptionInfo").read()
+        else:
+            # Lê manualmente: CFB começa com assinatura 0xD0CF11E0...
+            # Localiza EncryptionInfo via parsing básico (fallback)
+            raw = _read_encryption_info_raw(filepath)
+            if raw is None:
+                info["error"] = "olefile não instalado e parsing manual falhou"
+                return info
+
+        if len(raw) < 8:
+            info["error"] = "Stream EncryptionInfo muito curto"
+            return info
+
+        major, minor = struct.unpack_from("<HH", raw, 0)
+        info["major"] = major
+        info["minor"] = minor
+
+        # ── Agile Encryption (major=4, minor=4) ─────────────────────────
+        # 4 bytes reservados + XML
+        if major == 4 and minor == 4:
+            info["enc_type"] = ENC_AES_256
+            xml_bytes = raw[8:]
+            info["raw_xml"] = xml_bytes.decode("utf-8", errors="replace")
+            _parse_agile_xml(xml_bytes, info)
+            return info
+
+        # ── Standard Encryption (major=3|4, minor=2|3) ───────────────────
+        if minor in (2, 3):
+            # 4 bytes flags + EncryptionHeader
+            flags = struct.unpack_from("<I", raw, 4)[0]
+            offset = 8
+            hdr_size = struct.unpack_from("<I", raw, offset)[0]
+            offset += 4  # skip HeaderSize field
+
+            h_flags   = struct.unpack_from("<I", raw, offset)[0];     offset += 4
+            _          = struct.unpack_from("<I", raw, offset)[0];     offset += 4  # SizeExtra
+            alg_id    = struct.unpack_from("<I", raw, offset)[0];      offset += 4
+            hash_id   = struct.unpack_from("<I", raw, offset)[0];      offset += 4
+            key_bits  = struct.unpack_from("<I", raw, offset)[0];      offset += 4
+            prov_type = struct.unpack_from("<I", raw, offset)[0];      offset += 4
+            offset    += 8  # Reserved1 + Reserved2
+
+            # CSPName (UTF-16LE, null-terminated)
+            csp_raw = raw[offset: offset + hdr_size - 32]
+            try:
+                provider = csp_raw.rstrip(b"\x00").decode("utf-16-le")
+            except Exception:
+                provider = ""
+
+            alg_name  = _ALG_MAP.get(alg_id,  f"AlgID=0x{alg_id:04X}")
+            hash_name = _HASH_MAP.get(hash_id, f"HashID=0x{hash_id:04X}")
+
+            info["alg"]       = alg_name
+            info["hash_alg"]  = hash_name
+            info["key_bits"]  = key_bits
+            info["provider"]  = provider
+
+            if alg_id == 0x6801:       # RC4
+                info["enc_type"] = ENC_RC4_40 if key_bits <= 40 else ENC_RC4_128
+            elif alg_id == 0x660E:
+                info["enc_type"] = ENC_AES_128
+            elif alg_id == 0x660F:
+                info["enc_type"] = ENC_AES_192
+            elif alg_id == 0x6610:
+                info["enc_type"] = ENC_AES_256
+            else:
+                info["enc_type"] = f"Desconhecido (AlgID=0x{alg_id:04X})"
+
+            # EncryptionVerifier — extrai salt
+            ver_offset = 8 + 4 + hdr_size  # flags(4) + headerSize field(4) + header
+            salt_size  = struct.unpack_from("<I", raw, ver_offset)[0]
+            info["salt_size"] = salt_size
+            return info
+
+        # ── XOR Obfuscation (BIFF2-BIFF8, .xls antigo) ───────────────────
+        if major == 1 and minor == 1:
+            info["enc_type"] = ENC_XOR
+            info["alg"]      = "XOR"
+            info["key_bits"] = 16
+            return info
+
+    except Exception as e:
+        info["error"] = str(e)
+
+    return info
+
+
+def _parse_agile_xml(xml_bytes: bytes, info: dict):
+    """Extrai parâmetros do XML Agile Encryption."""
+    try:
+        root = ET.fromstring(xml_bytes)
+        # Namespace pode variar
+        for elem in root.iter():
+            tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
+            if tag == "encryptedKey":
+                info["spin_count"] = int(elem.attrib.get("spinCount", 100000))
+                info["hash_alg"]   = elem.attrib.get("hashAlgorithm", "SHA-512")
+                info["key_bits"]   = int(elem.attrib.get("keyBits", 256))
+                info["salt_size"]  = int(elem.attrib.get("saltSize", 16))
+                info["alg"]        = elem.attrib.get("cipherAlgorithm", "AES")
+                break
+    except Exception:
+        pass
+
+
+def _read_encryption_info_raw(filepath) -> bytes | None:
+    """
+    Fallback mínimo para extrair stream EncryptionInfo de um CFB sem olefile.
+    Lê apenas os primeiros 2 KB do arquivo para detectar versão.
+    """
+    try:
+        with open(filepath, "rb") as f:
+            # Assinatura CFB: D0 CF 11 E0 A1 B1 1A E1
+            sig = f.read(8)
+            if sig != b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":
+                return None
+            # Sem olefile não conseguimos navegar o FAT corretamente
+            return None
+    except Exception:
+        return None
+
+
+# ── Gerador inteligente de candidatos ────────────────────────────────────────
+
+# Wordlist embutida — português + inglês + padrões universais
+_BUILTIN_WORDLIST = [
+    # vazios / triviais
+    "", " ",
+    # senhas numéricas universais
+    "0", "1", "123", "1234", "12345", "123456", "1234567", "12345678",
+    "0000", "0001", "1111", "2222", "3333", "4444", "5555", "6666",
+    "7777", "8888", "9999", "00000", "11111", "99999", "000000", "111111",
+    "999999", "123123", "321321", "112233", "998877",
+    # senhas em português
+    "senha", "senhas", "senha1", "senha123", "Senha1", "Senha123",
+    "segredo", "acesso", "planilha", "excel", "arquivo", "dados",
+    "empresa", "usuario", "admin", "administrador", "financeiro",
+    "contabil", "contato", "relatorio", "projeto", "sistema",
+    "protegido", "proteger", "bloqueado", "confidencial",
+    "privado", "secreto", "chave", "codigo", "numero",
+    # senhas em inglês
+    "password", "pass", "passwd", "secret", "admin", "root",
+    "login", "user", "access", "office", "excel123", "test",
+    "welcome", "master", "manager", "default", "change",
+    "letmein", "qwerty", "monkey", "dragon", "trustno1",
+    "iloveyou", "sunshine", "princess", "football", "shadow",
+    # padrões alfanuméricos comuns
+    "abc123", "abc1234", "Abc123", "Abc1234", "ABC123",
+    "pass123", "Pass123", "Pass@123", "P@ss123", "P@ssw0rd",
+    "Admin1", "Admin123", "Admin@123", "root123", "Root123",
+    "Welcome1", "Welcome123", "welcome1", "changeme", "Change1",
+    # empresas / sistemas (comum em arquivos corporativos)
+    "fiscal", "rh", "ti", "financas", "faturamento", "compras",
+    "vendas", "logistica", "producao", "qualidade", "auditoria",
+    # padrões com ano (gerado dinamicamente abaixo)
+]
+
+# Acrescenta anos dinamicamente: 1990–2030 e variações
+for _y in range(1990, 2031):
+    _BUILTIN_WORDLIST += [
+        str(_y),
+        f"senha{_y}", f"Senha{_y}", f"pass{_y}", f"excel{_y}",
+        f"admin{_y}", f"fiscal{_y}", f"dados{_y}",
+    ]
+
+# Padrões sazonais/mês
+_MONTHS_PT = ["jan","fev","mar","abr","mai","jun",
+              "jul","ago","set","out","nov","dez"]
+_MONTHS_EN = ["jan","feb","mar","apr","may","jun",
+              "jul","aug","sep","oct","nov","dec"]
+for _m in _MONTHS_PT + _MONTHS_EN:
+    for _y in range(2018, 2031):
+        _BUILTIN_WORDLIST.append(f"{_m}{_y}")
+        _BUILTIN_WORDLIST.append(f"{_m.capitalize()}{_y}")
+
+# Remove duplicatas preservando ordem
+_seen = set()
+_UNIQUE_WORDLIST = []
+for _w in _BUILTIN_WORDLIST:
+    if _w not in _seen:
+        _seen.add(_w)
+        _UNIQUE_WORDLIST.append(_w)
+_BUILTIN_WORDLIST = _UNIQUE_WORDLIST
+
+
+def generate_candidates(
+    custom_wordlist: list[str] | None = None,
+    wordlist_file: str | None = None,
+    charset: str = "digits",
+    max_brute_len: int = 4,
+    stop_event: threading.Event | None = None,
+):
+    """
+    Gerador que produz candidatos a senha em ordem de probabilidade:
+
+      1. Wordlist embutida (português + inglês + padrões corporativos)
+      2. Wordlist customizada passada como lista
+      3. Wordlist de arquivo externo (.txt, um por linha)
+      4. Força bruta crescente até max_brute_len caracteres
+         charset: "digits" | "lower" | "alphanum" | "extended"
+    """
+    charsets = {
+        "digits":   string.digits,
+        "lower":    string.ascii_lowercase + string.digits,
+        "alphanum": string.ascii_letters + string.digits,
+        "extended": string.ascii_letters + string.digits + "!@#$%*-_.",
+    }
+    chars = charsets.get(charset, string.digits)
+
+    # 1. Wordlist embutida
+    for w in _BUILTIN_WORDLIST:
+        if stop_event and stop_event.is_set():
+            return
+        yield w
+
+    # 2. Wordlist customizada
+    if custom_wordlist:
+        for w in custom_wordlist:
+            if stop_event and stop_event.is_set():
+                return
+            yield w.strip()
+
+    # 3. Arquivo de wordlist
+    if wordlist_file:
+        try:
+            with open(wordlist_file, "r", encoding="utf-8", errors="ignore") as fh:
+                for line in fh:
+                    if stop_event and stop_event.is_set():
+                        return
+                    w = line.strip()
+                    if w:
+                        yield w
+        except Exception:
+            pass
+
+    # 4. Força bruta
+    if max_brute_len > 0:
+        for length in range(1, max_brute_len + 1):
+            for combo in itertools.product(chars, repeat=length):
+                if stop_event and stop_event.is_set():
+                    return
+                yield "".join(combo)
+
+
+
 
 NS_MAP = {
     "main":     "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
@@ -772,6 +1114,215 @@ class ExcelProcessor:
         self._log(f"[SUCESSO] Arquivo salvo: {out_path}")
         return True
 
+    # ══════════════════════════════════════════════════════════════════════════
+    #  Opção 4 — Quebrar senha de abertura (criptografia de arquivo)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def crack_open_password(
+        self,
+        charset: str = "digits",
+        max_brute_len: int = 4,
+        wordlist_file: str | None = None,
+        custom_words: list[str] | None = None,
+        stop_event: threading.Event | None = None,
+        status_cb=None,
+    ) -> bool:
+        """
+        Opção 4: Tenta quebrar a senha de abertura de um arquivo Excel
+        criptografado analisando o tipo de criptografia e testando
+        candidatos gerados de forma inteligente.
+
+        Fluxo:
+          1. Verifica se o arquivo é realmente criptografado (CFB).
+          2. Analisa o stream EncryptionInfo e loga todos os parâmetros.
+          3. Para XOR/RC4-40 legados: tenta colisão de hash direto.
+          4. Para AES: itera candidatos via msoffcrypto.OfficeFile.
+          5. Ao encontrar: decifra, remove proteções internas e salva.
+        """
+        self._log("═" * 60)
+        self._log(f"[OPÇÃO 4] Quebrar senha de abertura  →  {self.src.name}")
+        self.progress(3)
+
+        if not HAS_MSOFFCRYPTO:
+            self._log(
+                "msoffcrypto-tool não instalado. "
+                "Execute: pip install msoffcrypto-tool", "ERROR"
+            )
+            return False
+
+        if not self._is_encrypted():
+            self._log(
+                "O arquivo não está criptografado com senha de abertura. "
+                "Para proteções de planilha use a Opção 3.", "WARNING"
+            )
+            return False
+
+        # ── Etapa 1: Análise de criptografia ──────────────────────────────
+        self._log("◈ Analisando estrutura de criptografia do arquivo...")
+        enc = analyze_encryption(self.src)
+
+        self._log(f"  Tipo       : {enc['enc_type']}")
+        self._log(f"  Versão     : major={enc['major']} minor={enc['minor']}")
+        self._log(f"  Algoritmo  : {enc['alg']}")
+        self._log(f"  Hash       : {enc['hash_alg']}")
+        self._log(f"  Chave      : {enc['key_bits']} bits")
+        if enc["spin_count"]:
+            self._log(f"  SpinCount  : {enc['spin_count']:,} iterações PBKDF2")
+        if enc["salt_size"]:
+            self._log(f"  Salt       : {enc['salt_size']} bytes")
+        if enc["provider"]:
+            self._log(f"  Provedor   : {enc['provider']}")
+        if enc["error"]:
+            self._log(f"  Aviso      : {enc['error']}", "WARNING")
+
+        # Estimativa de velocidade
+        if enc["spin_count"] >= 100000:
+            self._log(
+                "  ⚡ AES-256 + PBKDF2 com 100 k iterações: "
+                "≈ 1–5 tentativas/s em Python puro. "
+                "Wordlist embutida cobre senhas comuns e corporativas.", "WARNING"
+            )
+        elif "RC4" in enc["enc_type"] or "XOR" in enc["enc_type"]:
+            self._log(
+                "  ⚡ Criptografia legada RC4/XOR: muito rápida, "
+                "brute force viável."
+            )
+
+        self.progress(8)
+
+        # ── Etapa 2: Tentativa de quebra ──────────────────────────────────
+        self._log("◈ Iniciando ataque inteligente de senhas...")
+        self._log(
+            f"  Charset    : {charset}  |  "
+            f"Brute-force máx: {max_brute_len} chars  |  "
+            f"Wordlist externa: {'Sim' if wordlist_file else 'Não'}"
+        )
+
+        found_password: str | None = None
+        attempts      = 0
+        t_start       = time.perf_counter()
+        last_log_time = t_start
+
+        # Fase 1: wordlist (80 % da barra de progresso)
+        wordlist_total = len(_BUILTIN_WORDLIST) + (len(custom_words) if custom_words else 0)
+
+        gen = generate_candidates(
+            custom_wordlist=custom_words,
+            wordlist_file=wordlist_file,
+            charset=charset,
+            max_brute_len=max_brute_len,
+            stop_event=stop_event,
+        )
+
+        for candidate in gen:
+
+            if stop_event and stop_event.is_set():
+                self._log("◈ Operação interrompida pelo usuário.", "WARNING")
+                return False
+
+            attempts += 1
+
+            # Tenta decifrar
+            try:
+                with open(self.src, "rb") as f:
+                    office = msoffcrypto.OfficeFile(f)
+                    office.load_key(password=candidate)
+                    test_buf = io.BytesIO()
+                    office.decrypt(test_buf)
+                # Decifrou sem exceção → senha encontrada
+                found_password = candidate
+                break
+
+            except Exception:
+                pass  # Senha incorreta
+
+            # Atualiza progresso e log periodicamente
+            now = time.perf_counter()
+            if now - last_log_time >= 3.0:
+                elapsed  = now - t_start
+                speed    = attempts / elapsed if elapsed > 0 else 0
+                # Progresso aproximado pela posição na wordlist
+                pct = min(8 + int(72 * min(attempts, wordlist_total)
+                                  / max(wordlist_total, 1)), 80)
+                self.progress(pct)
+                self._log(
+                    f"  Tentativas: {attempts:,}  |  "
+                    f"Velocidade: {speed:.1f}/s  |  "
+                    f"Última testada: '{candidate[:30]}'"
+                )
+                if status_cb:
+                    status_cb(attempts, speed, candidate)
+                last_log_time = now
+
+        # ── Etapa 3: Resultado ────────────────────────────────────────────
+        elapsed = time.perf_counter() - t_start
+        self._log(
+            f"◈ Busca encerrada — {attempts:,} tentativas em "
+            f"{elapsed:.1f}s ({attempts/max(elapsed,0.001):.1f}/s)"
+        )
+
+        if found_password is None:
+            self._log(
+                "[RESULTADO] Senha não encontrada no espaço de busca atual.\n"
+                "  Sugestões:\n"
+                "  • Forneça um arquivo de wordlist personalizado\n"
+                "  • Aumente o comprimento de força bruta\n"
+                "  • Para AES-256 com senha complexa, use:\n"
+                "    hashcat -m 9500 hash.txt wordlist.txt  (modo Office 2013+)\n"
+                "    ou  john --format=office hash.txt",
+                "ERROR",
+            )
+            self.progress(0)
+            return False
+
+        # Senha encontrada
+        display = repr(found_password) if found_password else "'(vazia)'"
+        self._log(f"[✓ SENHA ENCONTRADA] {display}", "SUCCESS" if False else "INFO")
+        self._log(f"  Senha: {display}")
+        self._log(f"  Tentativas até encontrar: {attempts:,}")
+        self.progress(85)
+
+        # ── Etapa 4: Decifra e salva ──────────────────────────────────────
+        self._log("◈ Decifrando arquivo e removendo proteções internas...")
+        try:
+            with open(self.src, "rb") as f:
+                office = msoffcrypto.OfficeFile(f)
+                office.load_key(password=found_password)
+                dec_buf = io.BytesIO()
+                office.decrypt(dec_buf)
+
+            self.progress(90)
+            dec_buf.seek(0)
+
+            # Remove também quaisquer proteções de planilha internas
+            tmp_src  = self.src
+            self.src = dec_buf  # type: ignore[assignment]
+            out_path = self._output_path("SENHA_ENCONTRADA")
+            ok       = self._remove_zip_protections(out_path)
+            self.src = tmp_src
+
+            if ok:
+                self._log(
+                    f"[SUCESSO] Arquivo desbloqueado salvo em: {out_path}"
+                )
+                # Salva a senha encontrada em arquivo de texto junto ao output
+                pwd_file = out_path.parent / f"{out_path.stem}_SENHA.txt"
+                pwd_file.write_text(
+                    f"Arquivo: {self.src.name}\n"
+                    f"Senha encontrada: {found_password}\n"
+                    f"Tentativas: {attempts:,}\n"
+                    f"Tempo: {elapsed:.1f}s\n"
+                    f"Tipo de criptografia: {enc['enc_type']}\n",
+                    encoding="utf-8",
+                )
+                self._log(f"  Senha registrada em: {pwd_file.name}")
+            self.progress(100)
+            return ok
+
+        except Exception as e:
+            self._log(f"Falha ao decifrar com senha encontrada: {e}", "ERROR")
+            return False
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Interface Gráfica  (CustomTkinter)
@@ -779,18 +1330,21 @@ class ExcelProcessor:
 
 class App(ctk.CTk):
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
-        self.title(f"{APP_TITLE}  v{APP_VERSION}")
+        self.title(f"{APP_TITLE} v{APP_VERSION}")
         self.geometry(f"{APP_W}x{APP_H}")
         self.resizable(False, False)
-        self.configure(fg_color=COLORS["bg"])
-        self._running = False
+        self.configure(fg_color=FUNDO_PRINCIPAL)
+        
+        self._running: bool = False
+        self._stop_event = threading.Event()
+        self._fila_ui: queue.Queue[dict[str, Any]] = queue.Queue()
+        
         self._build_ui()
+        self._iniciar_loop_fila()
 
-    # ──────────── construção da UI ────────────────────────────────────────────
-
-    def _build_ui(self):
+    def _build_ui(self) -> None:
         self._header()
         self._dep_warning()
         self._file_section()
@@ -799,107 +1353,109 @@ class App(ctk.CTk):
         self._log_section()
         self._footer()
 
-    def _header(self):
-        frm = ctk.CTkFrame(self, fg_color=COLORS["accent"], corner_radius=0)
+    def _header(self) -> None:
+        frm = ctk.CTkFrame(self, fg_color=SUPERFICIE, corner_radius=0, height=80)
         frm.pack(fill="x")
+        frm.pack_propagate(False)
 
         ctk.CTkLabel(
             frm,
-            text=f"🔓  {APP_TITLE}",
+            text=f"🔓 {APP_TITLE}",
             font=ctk.CTkFont(family="Segoe UI", size=22, weight="bold"),
-            text_color=COLORS["blue"],
-        ).pack(side="left", padx=20, pady=12)
+            text_color=OURO_PRINCIPAL,
+        ).pack(side="left", padx=30, pady=25)
 
         ctk.CTkLabel(
             frm,
-            text=f"v{APP_VERSION}  •  XLSX / XLSM / XLS",
+            text=f"v{APP_VERSION} • XLSX / XLSM / XLS",
             font=ctk.CTkFont(size=11),
-            text_color=COLORS["subtext"],
-        ).pack(side="right", padx=20)
+            text_color=TEXTO_SECUNDARIO,
+        ).pack(side="right", padx=30)
 
-    def _dep_warning(self):
+    def _dep_warning(self) -> None:
         missing = []
         if not HAS_MSOFFCRYPTO:
             missing.append("msoffcrypto-tool")
         if not HAS_OPENPYXL:
             missing.append("openpyxl")
+        if not HAS_OLEFILE:
+            missing.append("olefile")
 
         if missing:
-            msg = "⚠  Dependências ausentes: " + ", ".join(missing)
-            msg += "   →  pip install " + " ".join(missing)
-            frm = ctk.CTkFrame(self, fg_color="#5a3a00", corner_radius=0)
+            msg = "Aviso: Dependências ausentes: " + ", ".join(missing)
+            msg += " → pip install " + " ".join(missing)
+            frm = ctk.CTkFrame(self, fg_color=PERIGO, corner_radius=0)
             frm.pack(fill="x")
             ctk.CTkLabel(
                 frm, text=msg,
                 font=ctk.CTkFont(size=11),
-                text_color=COLORS["yellow"],
+                text_color=TEXTO_DESTAQUE,
             ).pack(padx=12, pady=5)
 
-    def _file_section(self):
-        frm = ctk.CTkFrame(self, fg_color=COLORS["panel"], corner_radius=10)
-        frm.pack(fill="x", padx=16, pady=(12, 4))
+    def _file_section(self) -> None:
+        frm = ctk.CTkFrame(self, fg_color=SUPERFICIE, corner_radius=12)
+        frm.pack(fill="x", padx=20, pady=(10, 5))
 
-        # ── Arquivo origem ────────────────────────────────────────────────
+        # Origem
         row1 = ctk.CTkFrame(frm, fg_color="transparent")
-        row1.pack(fill="x", padx=14, pady=(10, 4))
+        row1.pack(fill="x", padx=20, pady=(10, 5))
 
-        ctk.CTkLabel(row1, text="📄  Arquivo Excel:",
+        ctk.CTkLabel(row1, text="Arquivo Excel:", width=110, anchor="w",
                      font=ctk.CTkFont(size=12, weight="bold"),
-                     text_color=COLORS["text"]).pack(side="left")
+                     text_color=TEXTO_PRIMARIO).pack(side="left")
 
         self.src_var = ctk.StringVar(value="Nenhum arquivo selecionado")
         ctk.CTkEntry(
             row1, textvariable=self.src_var,
-            width=480, state="readonly",
-            fg_color=COLORS["bg"], border_color=COLORS["accent"],
-        ).pack(side="left", padx=8)
+            state="readonly", fg_color=FUNDO_PRINCIPAL, border_color=BORDA_FORTE,
+        ).pack(side="left", fill="x", expand=True, padx=12)
 
         ctk.CTkButton(
             row1, text="Selecionar", width=100,
-            fg_color=COLORS["accent"],
+            fg_color=BORDA_FORTE, hover_color=BORDA_SUTIL,
             command=self._pick_file,
         ).pack(side="left")
 
-        # ── Pasta destino ─────────────────────────────────────────────────
+        # Destino
         row2 = ctk.CTkFrame(frm, fg_color="transparent")
-        row2.pack(fill="x", padx=14, pady=(0, 10))
+        row2.pack(fill="x", padx=20, pady=(5, 10))
 
-        ctk.CTkLabel(row2, text="📁  Pasta destino: ",
+        ctk.CTkLabel(row2, text="Pasta destino:", width=110, anchor="w",
                      font=ctk.CTkFont(size=12, weight="bold"),
-                     text_color=COLORS["text"]).pack(side="left")
+                     text_color=TEXTO_PRIMARIO).pack(side="left")
 
         self.dst_var = ctk.StringVar(value="Mesma pasta do arquivo")
         ctk.CTkEntry(
             row2, textvariable=self.dst_var,
-            width=480, state="readonly",
-            fg_color=COLORS["bg"], border_color=COLORS["accent"],
-        ).pack(side="left", padx=8)
+            state="readonly", fg_color=FUNDO_PRINCIPAL, border_color=BORDA_FORTE,
+        ).pack(side="left", fill="x", expand=True, padx=12)
 
         ctk.CTkButton(
             row2, text="Selecionar", width=100,
-            fg_color=COLORS["accent"],
+            fg_color=BORDA_FORTE, hover_color=BORDA_SUTIL,
             command=self._pick_dst,
         ).pack(side="left")
 
-    def _option_tabs(self):
+    def _option_tabs(self) -> None:
         self._opt_var = ctk.StringVar(value="1")
 
         nb = ctk.CTkTabview(
-            self, width=APP_W - 32, height=200,
-            fg_color=COLORS["panel"],
-            segmented_button_fg_color=COLORS["accent"],
-            segmented_button_selected_color=COLORS["green"],
-            segmented_button_unselected_color=COLORS["accent"],
+            self, height=210,
+            fg_color=SUPERFICIE,
+            segmented_button_fg_color=FUNDO_PRINCIPAL,
+            segmented_button_selected_color=BORDA_FORTE,
+            segmented_button_unselected_color=FUNDO_PRINCIPAL,
         )
-        nb.pack(padx=16, pady=4)
+        nb.pack(fill="x", padx=20, pady=5)
 
-        t1 = nb.add("  🗑  Opção 1 — Remover senha  ")
-        t2 = nb.add("  🔄  Opção 2 — Trocar senha  ")
-        t3 = nb.add("  🔬  Opção 3 — LookPic (encontrar)  ")
+        t1 = nb.add("Opção 1 — Remover")
+        t2 = nb.add("Opção 2 — Trocar")
+        t3 = nb.add("Opção 3 — LookPic")
+        t4 = nb.add("Opção 4 — Quebrar")
 
         self._nb = nb
 
-        # ── Tab 1 ─────────────────────────────────────────────────────────
+        # Tab 1
         ctk.CTkLabel(
             t1,
             text=(
@@ -908,18 +1464,17 @@ class App(ctk.CTk):
                 "informe a senha atual abaixo para decifrar o arquivo."
             ),
             font=ctk.CTkFont(size=12),
-            text_color=COLORS["text"],
+            text_color=TEXTO_PRIMARIO,
             justify="left",
-        ).grid(row=0, column=0, columnspan=3, sticky="w", padx=16, pady=(12, 6))
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=20, pady=(15, 10))
 
-        ctk.CTkLabel(t1, text="Senha do arquivo (se criptografado):",
-                     text_color=COLORS["subtext"]).grid(
-            row=1, column=0, sticky="e", padx=(16, 6), pady=4
+        ctk.CTkLabel(t1, text="Senha do arquivo (opcional):", text_color=TEXTO_SECUNDARIO).grid(
+            row=1, column=0, sticky="e", padx=(20, 10), pady=5
         )
-        self.t1_pwd = ctk.CTkEntry(t1, show="•", width=220, placeholder_text="deixe vazio se não houver")
-        self.t1_pwd.grid(row=1, column=1, sticky="w", pady=4)
+        self.t1_pwd = ctk.CTkEntry(t1, show="•", width=250, placeholder_text="deixe vazio se não houver", fg_color=FUNDO_PRINCIPAL, border_color=BORDA_FORTE)
+        self.t1_pwd.grid(row=1, column=1, sticky="w", pady=5)
 
-        # ── Tab 2 ─────────────────────────────────────────────────────────
+        # Tab 2
         ctk.CTkLabel(
             t2,
             text=(
@@ -927,23 +1482,23 @@ class App(ctk.CTk):
                 "Funciona para proteção de planilha/pasta E para arquivos criptografados."
             ),
             font=ctk.CTkFont(size=12),
-            text_color=COLORS["text"],
+            text_color=TEXTO_PRIMARIO,
             justify="left",
-        ).grid(row=0, column=0, columnspan=3, sticky="w", padx=16, pady=(12, 6))
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=20, pady=(15, 10))
 
         for i, (lbl, attr) in enumerate([
-            ("Senha atual:",  "t2_cur"),
-            ("Nova senha:",   "t2_new"),
-            ("Confirmar nova senha:", "t2_cfm"),
+            ("Senha atual:",           "t2_cur"),
+            ("Nova senha:",            "t2_new"),
+            ("Confirmar nova senha:",  "t2_cfm"),
         ], start=1):
-            ctk.CTkLabel(t2, text=lbl, text_color=COLORS["subtext"]).grid(
-                row=i, column=0, sticky="e", padx=(16, 6), pady=3
+            ctk.CTkLabel(t2, text=lbl, text_color=TEXTO_SECUNDARIO).grid(
+                row=i, column=0, sticky="e", padx=(20, 10), pady=4
             )
-            e = ctk.CTkEntry(t2, show="•", width=220)
-            e.grid(row=i, column=1, sticky="w", pady=3)
+            e = ctk.CTkEntry(t2, show="•", width=250, fg_color=FUNDO_PRINCIPAL, border_color=BORDA_FORTE)
+            e.grid(row=i, column=1, sticky="w", pady=4)
             setattr(self, attr, e)
 
-        # ── Tab 3 ─────────────────────────────────────────────────────────
+        # Tab 3
         ctk.CTkLabel(
             t3,
             text=(
@@ -953,126 +1508,202 @@ class App(ctk.CTk):
                 "O arquivo desbloqueado é salvo na pasta destino."
             ),
             font=ctk.CTkFont(size=12),
-            text_color=COLORS["text"],
+            text_color=TEXTO_PRIMARIO,
             justify="left",
-        ).pack(padx=16, pady=14, anchor="w")
+        ).pack(padx=20, pady=20, anchor="w")
 
-    def _progress_section(self):
-        frm = ctk.CTkFrame(self, fg_color=COLORS["panel"], corner_radius=10)
-        frm.pack(fill="x", padx=16, pady=4)
+        # Tab 4
+        ctk.CTkLabel(
+            t4,
+            text=(
+                "Identifica o tipo de criptografia, analisa os parâmetros e testa\n"
+                "combinações inteligentes até encontrar a senha de abertura do arquivo."
+            ),
+            font=ctk.CTkFont(size=12),
+            text_color=TEXTO_PRIMARIO,
+            justify="left",
+        ).grid(row=0, column=0, columnspan=4, sticky="w", padx=20, pady=(10, 10))
+
+        ctk.CTkLabel(t4, text="Charset:", text_color=TEXTO_SECUNDARIO, font=ctk.CTkFont(size=11)).grid(
+            row=1, column=0, sticky="e", padx=(20, 10), pady=4
+        )
+        self.t4_charset = ctk.CTkComboBox(
+            t4,
+            values=["digits   (0-9)", "lower    (a-z + 0-9)", "alphanum (A-Za-z0-9)", "extended (A-Za-z0-9!@#$...)"],
+            width=200, state="readonly", fg_color=FUNDO_PRINCIPAL, border_color=BORDA_FORTE
+        )
+        self.t4_charset.set("digits   (0-9)")
+        self.t4_charset.grid(row=1, column=1, sticky="w", pady=4)
+
+        ctk.CTkLabel(t4, text="Máx len:", text_color=TEXTO_SECUNDARIO, font=ctk.CTkFont(size=11)).grid(
+            row=1, column=2, sticky="e", padx=(20, 10), pady=4
+        )
+        self.t4_maxlen = ctk.CTkComboBox(
+            t4,
+            values=["0 (desativado)", "1", "2", "3", "4", "5", "6"],
+            width=130, state="readonly", fg_color=FUNDO_PRINCIPAL, border_color=BORDA_FORTE
+        )
+        self.t4_maxlen.set("4")
+        self.t4_maxlen.grid(row=1, column=3, sticky="w", pady=4)
+
+        ctk.CTkLabel(t4, text="Wordlist:", text_color=TEXTO_SECUNDARIO, font=ctk.CTkFont(size=11)).grid(
+            row=2, column=0, sticky="e", padx=(20, 10), pady=4
+        )
+        self.t4_wl_var = ctk.StringVar(value="")
+        ctk.CTkEntry(
+            t4, textvariable=self.t4_wl_var,
+            width=200, state="readonly", fg_color=FUNDO_PRINCIPAL, border_color=BORDA_FORTE, placeholder_text="opcional"
+        ).grid(row=2, column=1, sticky="w", pady=4)
+
+        ctk.CTkButton(
+            t4, text="Escolher", width=80, fg_color=BORDA_FORTE, hover_color=BORDA_SUTIL, command=self._pick_wordlist,
+        ).grid(row=2, column=2, sticky="w", padx=(10, 0), pady=4)
+
+        self.t4_speed_lbl = ctk.CTkLabel(
+            t4, text="Aguardando execução...",
+            font=ctk.CTkFont(family="Consolas", size=10), text_color=TEXTO_SECUNDARIO,
+        )
+        self.t4_speed_lbl.grid(row=3, column=0, columnspan=4, sticky="w", padx=20, pady=(10, 0))
+
+    def _progress_section(self) -> None:
+        frm = ctk.CTkFrame(self, fg_color=SUPERFICIE, corner_radius=12)
+        frm.pack(fill="x", padx=20, pady=5)
 
         row = ctk.CTkFrame(frm, fg_color="transparent")
-        row.pack(fill="x", padx=14, pady=10)
+        row.pack(fill="x", padx=20, pady=10)
 
         self.prog_bar = ctk.CTkProgressBar(
-            row, width=540, height=18,
-            progress_color=COLORS["green"],
-            fg_color=COLORS["accent"],
+            row, height=12, progress_color=ESMERALDA_PRIMARIA, fg_color=BORDA_FORTE,
         )
-        self.prog_bar.pack(side="left")
+        self.prog_bar.pack(side="left", fill="x", expand=True)
         self.prog_bar.set(0)
 
         self.prog_label = ctk.CTkLabel(
-            row, text="0 %",
-            font=ctk.CTkFont(size=12, weight="bold"),
-            text_color=COLORS["green"], width=50,
+            row, text="0 %", font=ctk.CTkFont(size=12, weight="bold"), text_color=ESMERALDA_PRIMARIA, width=50,
         )
-        self.prog_label.pack(side="left", padx=10)
+        self.prog_label.pack(side="left", padx=15)
+
+        self.stop_btn = ctk.CTkButton(
+            row, text="Parar", width=100, height=36,
+            font=ctk.CTkFont(size=12, weight="bold"), fg_color=ERRO, hover_color=PERIGO, state="disabled", command=self._stop,
+        )
+        self.stop_btn.pack(side="right", padx=(10, 0))
 
         self.run_btn = ctk.CTkButton(
-            row, text="▶  Executar", width=140, height=36,
-            font=ctk.CTkFont(size=13, weight="bold"),
-            fg_color=COLORS["green"],
-            hover_color="#00a381",
-            command=self._run,
+            row, text="Executar", width=140, height=36,
+            font=ctk.CTkFont(size=13, weight="bold"), fg_color=ESMERALDA_PRIMARIA, hover_color=ESMERALDA_DEEP, command=self._run,
         )
         self.run_btn.pack(side="right")
 
-    def _log_section(self):
-        frm = ctk.CTkFrame(self, fg_color=COLORS["panel"], corner_radius=10)
-        frm.pack(fill="both", expand=True, padx=16, pady=(4, 4))
+    def _log_section(self) -> None:
+        frm = ctk.CTkFrame(self, fg_color=SUPERFICIE, corner_radius=12)
+        frm.pack(fill="both", expand=True, padx=20, pady=(5, 10))
 
         hdr = ctk.CTkFrame(frm, fg_color="transparent")
-        hdr.pack(fill="x", padx=10, pady=(6, 0))
+        hdr.pack(fill="x", padx=20, pady=(10, 0))
 
-        ctk.CTkLabel(hdr, text="📋  Log de execução",
-                     font=ctk.CTkFont(size=12, weight="bold"),
-                     text_color=COLORS["text"]).pack(side="left")
+        ctk.CTkLabel(hdr, text="Log de execução", font=ctk.CTkFont(size=12, weight="bold"), text_color=TEXTO_PRIMARIO).pack(side="left")
 
         ctk.CTkButton(
-            hdr, text="Limpar", width=70, height=26,
-            fg_color=COLORS["accent"],
-            command=self._clear_log,
+            hdr, text="Limpar", width=70, height=28, fg_color=BORDA_FORTE, hover_color=BORDA_SUTIL, command=self._clear_log,
         ).pack(side="right")
 
         self.log_box = ctk.CTkTextbox(
-            frm, wrap="word",
-            font=ctk.CTkFont(family="Consolas", size=11),
-            fg_color=COLORS["bg"],
-            text_color=COLORS["text"],
+            frm, wrap="word", font=ctk.CTkFont(family="Consolas", size=11), fg_color=FUNDO_PRINCIPAL, text_color=TEXTO_PRIMARIO, border_color=BORDA_FORTE, border_width=1
         )
-        self.log_box.pack(fill="both", expand=True, padx=10, pady=(4, 10))
+        self.log_box.pack(fill="both", expand=True, padx=20, pady=15)
         self.log_box.configure(state="disabled")
 
-    def _footer(self):
-        frm = ctk.CTkFrame(self, fg_color=COLORS["accent"], corner_radius=0, height=28)
-        frm.pack(fill="x", side="bottom")
-        ctk.CTkLabel(
-            frm,
-            text=f"Log salvo em: {LOG_FILE}",
+    def _footer(self) -> None:
+        rodape_autoral = ctk.CTkLabel(
+            self,
+            text="Roberto Santos [LABS]©",
             font=ctk.CTkFont(size=10),
-            text_color=COLORS["subtext"],
-        ).pack(side="left", padx=12, pady=4)
+            text_color=TEXTO_SECUNDARIO,
+        )
+        rodape_autoral.pack(side="bottom", fill="x", padx=10, pady=(0, 8))
 
     # ──────────── callbacks ───────────────────────────────────────────────────
 
-    def _pick_file(self):
+    def _iniciar_loop_fila(self) -> None:
+        self._processar_fila()
+
+    def _processar_fila(self) -> None:
+        try:
+            while True:
+                mensagem = self._fila_ui.get_nowait()
+                self._tratar_mensagem_ui(mensagem)
+        except queue.Empty:
+            pass
+        self.after(50, self._processar_fila)
+
+    def _tratar_mensagem_ui(self, mensagem: dict[str, Any]) -> None:
+        acao = mensagem.get("acao")
+        if acao == "atualizar_progresso":
+            val = mensagem.get("valor", 0)
+            self.prog_bar.set(val / 100)
+            self.prog_label.configure(text=f"{val} %")
+        elif acao == "atualizar_log":
+            line = mensagem.get("texto", "")
+            self.log_box.configure(state="normal")
+            self.log_box.insert("end", line)
+            self.log_box.see("end")
+            self.log_box.configure(state="disabled")
+        elif acao == "atualizar_velocidade":
+            texto = mensagem.get("texto", "")
+            self.t4_speed_lbl.configure(text=texto)
+        elif acao == "processamento_concluido":
+            self._running = False
+            self.run_btn.configure(state="normal", text="Executar")
+            self.stop_btn.configure(state="disabled")
+
+    def _pick_file(self) -> None:
         path = filedialog.askopenfilename(
             title="Selecionar arquivo Excel",
-            filetypes=[
-                ("Excel files", "*.xlsx *.xlsm *.xls *.xlsb"),
-                ("Todos os arquivos", "*.*"),
-            ],
+            filetypes=[("Excel files", "*.xlsx *.xlsm *.xls *.xlsb"), ("Todos os arquivos", "*.*")],
         )
         if path:
             self.src_var.set(path)
-            # Define destino padrão como mesma pasta do arquivo
             if self.dst_var.get() in ("", "Mesma pasta do arquivo"):
                 self.dst_var.set(str(Path(path).parent))
             self._log_append(f"Arquivo selecionado: {path}")
 
-    def _pick_dst(self):
+    def _pick_dst(self) -> None:
         path = filedialog.askdirectory(title="Selecionar pasta de destino")
         if path:
             self.dst_var.set(path)
 
-    def _clear_log(self):
+    def _pick_wordlist(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Selecionar wordlist (.txt)", filetypes=[("Arquivo de texto", "*.txt"), ("Todos", "*.*")],
+        )
+        if path:
+            self.t4_wl_var.set(path)
+            self._log_append(f"Wordlist externa: {path}")
+
+    def _stop(self) -> None:
+        if self._running:
+            self._stop_event.set()
+            self._log_append("Sinal de parada enviado...", "WARNING")
+            self.stop_btn.configure(state="disabled")
+
+    def _clear_log(self) -> None:
         self.log_box.configure(state="normal")
         self.log_box.delete("1.0", "end")
         self.log_box.configure(state="disabled")
 
     # ──────────── log na caixa de texto ──────────────────────────────────────
 
-    def _log_append(self, msg: str, level: str = "INFO"):
+    def _log_append(self, msg: str, level: str = "INFO") -> None:
         ts = datetime.now().strftime("%H:%M:%S")
         icons = {"INFO": "ℹ", "WARNING": "⚠", "ERROR": "✖", "SUCCESS": "✔"}
-        colors_map = {
-            "INFO":    COLORS["text"],
-            "WARNING": COLORS["yellow"],
-            "ERROR":   COLORS["red"],
-            "SUCCESS": COLORS["green"],
-        }
         icon = icons.get(level, "•")
         line = f"[{ts}] {icon}  {msg}\n"
-
-        self.log_box.configure(state="normal")
-        self.log_box.insert("end", line)
-        self.log_box.see("end")
-        self.log_box.configure(state="disabled")
+        self._fila_ui.put({"acao": "atualizar_log", "texto": line})
 
     # ──────────── execução em thread ──────────────────────────────────────────
 
-    def _run(self):
+    def _run(self) -> None:
         if self._running:
             return
 
@@ -1094,34 +1725,27 @@ class App(ctk.CTk):
             mode = "remove"
         elif "2" in tab:
             mode = "change"
-        else:
+        elif "3" in tab:
             mode = "find"
+        else:
+            mode = "crack_open"
 
         self._running = True
-        self.run_btn.configure(state="disabled", text="⏳  Processando...")
+        self._stop_event.clear()
+        self.run_btn.configure(state="disabled", text="Processando...")
+        self.stop_btn.configure(state="normal")
         self._set_progress(0)
 
-        t = threading.Thread(
-            target=self._worker,
-            args=(src, dst, mode),
-            daemon=True,
-        )
-        t.start()
+        threading.Thread(target=self._worker, args=(src, dst, mode), daemon=True).start()
 
-    def _set_progress(self, val: int):
-        """Atualiza barra e label de progresso (thread-safe via after)."""
-        def _update():
-            self.prog_bar.set(val / 100)
-            self.prog_label.configure(text=f"{val} %")
-        self.after(0, _update)
+    def _set_progress(self, val: int) -> None:
+        self._fila_ui.put({"acao": "atualizar_progresso", "valor": val})
 
-    def _worker(self, src: str, dst: str, mode: str):
+    def _worker(self, src: str, dst: str, mode: str) -> None:
         proc = ExcelProcessor(
             src, dst,
             progress_cb=lambda v, _=None: self._set_progress(v),
-            log_cb=lambda m, lvl="INFO": self.after(
-                0, lambda: self._log_append(m, lvl)
-            ),
+            log_cb=lambda m, lvl="INFO": self._log_append(m, lvl),
         )
 
         ok = False
@@ -1135,52 +1759,58 @@ class App(ctk.CTk):
                 new = self.t2_new.get()
                 cfm = self.t2_cfm.get()
                 if new != cfm:
-                    self.after(0, lambda: self._log_append(
-                        "Nova senha e confirmação não coincidem.", "ERROR"
-                    ))
+                    self._log_append("Nova senha e confirmação não coincidem.", "ERROR")
                 else:
-                    ok = proc.change_password(
-                        current_pwd=cur, new_pwd=new
-                    )
+                    ok = proc.change_password(current_pwd=cur, new_pwd=new)
 
             elif mode == "find":
                 ok = proc.find_password()
 
+            elif mode == "crack_open":
+                charset_raw = self.t4_charset.get().split()[0]
+                maxlen_raw  = self.t4_maxlen.get().split()[0]
+                try:
+                    max_brute = int(maxlen_raw)
+                except ValueError:
+                    max_brute = 0
+
+                wl_file = self.t4_wl_var.get() or None
+
+                def status_cb(attempts: int, speed: float, last_pwd: str) -> None:
+                    texto = f"⚡ {attempts:,} tentativas  |  {speed:.1f}/s  |  última: '{last_pwd[:28]}'"
+                    self._fila_ui.put({"acao": "atualizar_velocidade", "texto": texto})
+
+                ok = proc.crack_open_password(
+                    charset=charset_raw, max_brute_len=max_brute, wordlist_file=wl_file,
+                    stop_event=self._stop_event, status_cb=status_cb,
+                )
+
         except Exception as e:
             logger.exception("Erro inesperado")
-            self.after(0, lambda: self._log_append(
-                f"Erro inesperado: {e}", "ERROR"
-            ))
+            self._log_append(f"Erro inesperado: {e}", "ERROR")
 
-        def _done():
-            self._running = False
-            self.run_btn.configure(state="normal", text="▶  Executar")
-            if ok:
-                self._log_append("Operação concluída com sucesso! ✔", "SUCCESS")
-                self._set_progress(100)
-            else:
-                self._log_append("Operação concluída com falhas. Verifique o log.", "ERROR")
-
-        self.after(0, _done)
+        if ok:
+            self._log_append("Operação concluída com sucesso! ✔", "SUCCESS")
+            self._set_progress(100)
+        else:
+            self._log_append("Operação concluída com falhas. Verifique o log.", "ERROR")
+            
+        self._fila_ui.put({"acao": "processamento_concluido"})
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  Entry-point
-# ══════════════════════════════════════════════════════════════════════════════
-
-def main():
+def main() -> None:
     logger.info("=" * 60)
     logger.info(f"{APP_TITLE} v{APP_VERSION} — iniciado")
     logger.info(f"Python {sys.version}")
-    logger.info(f"msoffcrypto disponível: {HAS_MSOFFCRYPTO}")
-    logger.info(f"openpyxl disponível: {HAS_OPENPYXL}")
+    logger.info(f"msoffcrypto disponível : {HAS_MSOFFCRYPTO}")
+    logger.info(f"openpyxl disponível   : {HAS_OPENPYXL}")
+    logger.info(f"olefile disponível    : {HAS_OLEFILE}")
     logger.info("=" * 60)
 
     app = App()
     app.mainloop()
 
     logger.info(f"{APP_TITLE} — encerrado")
-
 
 if __name__ == "__main__":
     main()

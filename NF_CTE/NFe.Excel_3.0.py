@@ -1,602 +1,682 @@
+"""
+Módulo para conversão de NFe XML (Modelo 55) para Excel.
+Refatorado para o padrão premium, com injeção de dependências, logging e thread safety.
+"""
+from __future__ import annotations
+
+import logging
 import os
-import xml.etree.ElementTree as ET
-import pandas as pd
-import customtkinter as ctk
-from tkinter import filedialog, messagebox
+import queue
+import sys
 import threading
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
 from datetime import datetime
-from openpyxl.styles import numbers
+from logging.handlers import RotatingFileHandler
+from typing import Any, Callable
 
-# Configurações de aparência
-ctk.set_appearance_mode("System")
-ctk.set_default_color_theme("blue")
+import customtkinter as ctk
+import pandas as pd
+from tkinter import filedialog, messagebox
 
-class App(ctk.CTk):
-    def __init__(self):
-        super().__init__()
+# Opcionais se estiverem disponíveis
+try:
+    import openpyxl
+    from openpyxl.styles import numbers
+    from openpyxl.utils import get_column_letter
+except ImportError:
+    pass
 
-        self.title("Conversor NFe XML para Excel")
-        self.geometry("700x500")
+# =============================================================================
+# CONFIGURAÇÕES E CONSTANTES
+# =============================================================================
 
-        # Variáveis de caminho
-        self.xml_dir = ctk.StringVar()
-        self.export_dir = ctk.StringVar()
+def obter_diretorio_base() -> str:
+    """
+    Retorna o diretório raiz da aplicação.
+    Compatível com execução direta (.py) e executável compilado via Nuitka.
+    """
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
 
-        self.setup_ui()
+BASE_DIR: str = obter_diretorio_base()
 
-    def setup_ui(self):
-        # Título
-        self.label_title = ctk.CTkLabel(self, text="Extrator de Dados NFe (Modelo 55)",
-                                        font=ctk.CTkFont(size=20, weight="bold"))
-        self.label_title.pack(pady=20)
+# Paleta de Cores Premium Minimalista
+FUNDO_PRINCIPAL: str = "#0A0A0A"
+SUPERFICIE: str = "#1C1C1C"
+BORDA_FORTE: str = "#2A2A2A"
+BORDA_SUTIL: str = "#3A3A3A"
+TEXTO_SECUNDARIO: str = "#8C8C8C"
+TEXTO_PRIMARIO: str = "#BEBEBE"
+TEXTO_DESTAQUE: str = "#EDEDED"
+OURO_PRINCIPAL: str = "#D4AF37"
+OURO_ESCURO: str = "#B8972E"
+ESMERALDA_DEEP: str = "#006D4E"
+ESMERALDA_PRIMARIA: str = "#00A36C"
+ESMERALDA_SUCESSO: str = "#00C17C"
+ERRO: str = "#C8102E"
+PERIGO: str = "#8B0000"
+AVISO: str = "#FFB800"
 
-        # Seleção de pasta XML
-        self.frame_xml = ctk.CTkFrame(self)
-        self.frame_xml.pack(pady=10, padx=20, fill="x")
+PADX_PADRAO: int = 12
+PADY_PADRAO: int = 10
+RAIO_BORDA: int = 12
 
-        self.btn_xml = ctk.CTkButton(self.frame_xml, text="Selecionar Pasta XML", command=self.select_xml_folder)
-        self.btn_xml.pack(side="left", padx=10, pady=10)
+# =============================================================================
+# LOGGING
+# =============================================================================
 
-        self.entry_xml = ctk.CTkEntry(self.frame_xml, textvariable=self.xml_dir, width=350)
-        self.entry_xml.pack(side="left", padx=10, fill="x", expand=True)
+def criar_logger(nome_modulo: str, usuario: str = "sistema") -> logging.Logger:
+    """Cria logger configurado com formato padrão e rotação de arquivo."""
+    formato = f"[%(asctime)s],[{usuario}],[{nome_modulo}] %(levelname)s: %(message)s"
+    formatador = logging.Formatter(formato, datefmt="%Y-%m-%d %H:%M:%S")
 
-        # Seleção de pasta de destino
-        self.frame_export = ctk.CTkFrame(self)
-        self.frame_export.pack(pady=10, padx=20, fill="x")
+    caminho_log = os.path.join(BASE_DIR, "logs", "aplicacao.log")
+    os.makedirs(os.path.dirname(caminho_log), exist_ok=True)
 
-        self.btn_export = ctk.CTkButton(self.frame_export, text="Pasta de Destino", command=self.select_export_folder)
-        self.btn_export.pack(side="left", padx=10, pady=10)
+    handler_arquivo = RotatingFileHandler(
+        caminho_log, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+    )
+    handler_arquivo.setFormatter(formatador)
 
-        self.entry_export = ctk.CTkEntry(self.frame_export, textvariable=self.export_dir, width=350)
-        self.entry_export.pack(side="left", padx=10, fill="x", expand=True)
+    handler_console = logging.StreamHandler()
+    handler_console.setFormatter(formatador)
 
-        # Frame para opções de processamento
-        self.frame_options = ctk.CTkFrame(self)
-        self.frame_options.pack(pady=10, padx=20, fill="x")
+    logger = logging.getLogger(nome_modulo)
+    logger.setLevel(logging.INFO)
+    
+    # Evitar duplicar handlers se já existirem
+    if not logger.handlers:
+        logger.addHandler(handler_arquivo)
+        logger.addHandler(handler_console)
+        
+    return logger
 
-        self.process_option = ctk.StringVar(value="individual")
+logger = criar_logger("nfe_excel")
 
-        self.radio_individual = ctk.CTkRadioButton(self.frame_options, text="Um Excel por XML",
-                                                   variable=self.process_option, value="individual")
-        self.radio_individual.pack(side="left", padx=10, pady=5)
+# =============================================================================
+# EXCEÇÕES CUSTOMIZADAS
+# =============================================================================
 
-        self.radio_unico = ctk.CTkRadioButton(self.frame_options, text="Um único Excel com todos os XMLs",
-                                              variable=self.process_option, value="unico")
-        self.radio_unico.pack(side="left", padx=10, pady=5)
+class ErroConversao(Exception):
+    """Levantado quando falha a conversão de um XML específico."""
 
-        # Barra de Progresso
-        self.progress_bar = ctk.CTkProgressBar(self, orientation="horizontal")
-        self.progress_bar.pack(pady=20, padx=20, fill="x")
-        self.progress_bar.set(0)
+# =============================================================================
+# SERVIÇOS (LÓGICA DE NEGÓCIO)
+# =============================================================================
 
-        # Botão Play
-        self.btn_play = ctk.CTkButton(self, text="▶ Iniciar Processamento", command=self.start_thread,
-                                      fg_color="green", hover_color="darkgreen",
-                                      font=ctk.CTkFont(size=15, weight="bold"))
-        self.btn_play.pack(pady=20)
+class ServicoExtracaoNFe:
+    """Isola a lógica de extração de dados do XML da NFe."""
+    
+    def __init__(self, logger: logging.Logger) -> None:
+        self._logger = logger
+        self._ns = {'ns': 'http://www.portalfiscal.inf.br/nfe'}
 
-        self.status_label = ctk.CTkLabel(self, text="Aguardando início...")
-        self.status_label.pack()
-
-    def select_xml_folder(self):
-        path = filedialog.askdirectory(title="Selecione a pasta com os arquivos XML")
-        if path:
-            self.xml_dir.set(path)
-
-    def select_export_folder(self):
-        path = filedialog.askdirectory(title="Selecione onde salvar o arquivo Excel")
-        if path:
-            self.export_dir.set(path)
-
-    def format_value(self, value):
+    def formatar_valor(self, valor: Any) -> float:
         """Converte strings para float e garante o formato numérico."""
-        if value is None or value == "":
+        if valor is None or valor == "":
             return 0.0
         try:
-            # Remove possíveis vírgulas e espaços
-            if isinstance(value, str):
-                value = value.replace(',', '.').strip()
-            return float(value)
+            if isinstance(valor, str):
+                valor = valor.replace(',', '.').strip()
+            return float(valor)
         except ValueError:
             return 0.0
 
-    def get_tag_value(self, element, tag_name, default=""):
+    def obter_valor_tag(self, elemento: ET.Element | None, nome_tag: str, padrao: str = "") -> str:
         """Busca uma tag recursivamente no elemento."""
-        ns = {'ns': 'http://www.portalfiscal.inf.br/nfe'}
-        found = element.find(f".//ns:{tag_name}", ns)
-        if found is not None and found.text:
-            return found.text.strip()
-        return default
+        if elemento is None:
+            return padrao
+        encontrado = elemento.find(f".//ns:{nome_tag}", self._ns)
+        if encontrado is not None and encontrado.text:
+            return encontrado.text.strip()
+        return padrao
     
-    def get_tag_value_from_parent(self, parent_element, tag_name, default=""):
+    def obter_valor_tag_pai(self, elemento_pai: ET.Element | None, nome_tag: str, padrao: str = "") -> str:
         """Busca uma tag especificamente dentro de um elemento pai."""
-        ns = {'ns': 'http://www.portalfiscal.inf.br/nfe'}
-        if parent_element is not None:
-            found = parent_element.find(f".//ns:{tag_name}", ns)
-            if found is not None and found.text:
-                return found.text.strip()
-        return default
+        if elemento_pai is not None:
+            encontrado = elemento_pai.find(f".//ns:{nome_tag}", self._ns)
+            if encontrado is not None and encontrado.text:
+                return encontrado.text.strip()
+        return padrao
 
-    def format_date_br(self, date_str):
-        """Converte data do formato ISO (YYYY-MM-DD) para DD/MM/YYYY."""
-        if not date_str:
+    def formatar_data_br(self, data_str: str) -> str:
+        """Converte data do formato ISO para DD/MM/YYYY."""
+        if not data_str:
             return ""
         try:
-            # Tenta diferentes formatos de data
-            if 'T' in date_str:
-                date_str = date_str.split('T')[0]
+            if 'T' in data_str:
+                data_str = data_str.split('T')[0]
+            if '-' in data_str:
+                data_obj = datetime.strptime(data_str, "%Y-%m-%d")
+                return data_obj.strftime("%d/%m/%Y")
+            return data_str
+        except Exception:
+            self._logger.warning("Falha ao formatar data: %s", data_str)
+            return data_str
 
-            if '-' in date_str:
-                date_obj = datetime.strptime(date_str, "%Y-%m-%d")
-                return date_obj.strftime("%d/%m/%Y")
-            else:
-                return date_str
-        except:
-            return date_str
-
-    def extract_nf_data(self, root, ns):
+    def extrair_dados_gerais(self, root: ET.Element) -> dict[str, Any]:
         """Extrai os dados gerais da Nota Fiscal."""
-        # Dados da NF
-        nNF = self.get_tag_value(root, "nNF")
-        serie = self.get_tag_value(root, "serie")
-        dhEmi = self.format_date_br(self.get_tag_value(root, "dhEmi"))
-        chNFe = self.get_tag_value(root, "chNFe")
+        n_nf = self.obter_valor_tag(root, "nNF")
+        serie = self.obter_valor_tag(root, "serie")
+        dh_emi = self.formatar_data_br(self.obter_valor_tag(root, "dhEmi"))
+        ch_nfe = self.obter_valor_tag(root, "chNFe")
 
-        # Dados do Emitente
-        emit = root.find(".//ns:emit", ns)
-        cnpj_emit = self.get_tag_value(emit, "CNPJ") if emit is not None else ""
-        xNome_emit = self.get_tag_value(emit, "xNome") if emit is not None else ""
-        ie_emit = self.get_tag_value(emit, "IE") if emit is not None else ""
+        emit = root.find(".//ns:emit", self._ns)
+        cnpj_emit = self.obter_valor_tag(emit, "CNPJ")
+        x_nome_emit = self.obter_valor_tag(emit, "xNome")
+        ie_emit = self.obter_valor_tag(emit, "IE")
 
-        # Dados do Destinatário
-        dest = root.find(".//ns:dest", ns)
-        cnpj_dest = self.get_tag_value(dest, "CNPJ") if dest is not None else ""
-        xNome_dest = self.get_tag_value(dest, "xNome") if dest is not None else ""
-        xMun_dest = self.get_tag_value(dest, "xMun") if dest is not None else ""
+        dest = root.find(".//ns:dest", self._ns)
+        cnpj_dest = self.obter_valor_tag(dest, "CNPJ")
+        x_nome_dest = self.obter_valor_tag(dest, "xNome")
+        x_mun_dest = self.obter_valor_tag(dest, "xMun")
 
-        # Totais da NF - ESPECIFICAMENTE do bloco <total><ICMSTot>
-        total_element = root.find(".//ns:total", ns)
+        total_element = root.find(".//ns:total", self._ns)
         icms_tot_element = None
         if total_element is not None:
-            icms_tot_element = total_element.find(".//ns:ICMSTot", ns)
+            icms_tot_element = total_element.find(".//ns:ICMSTot", self._ns)
         
-        # Extrai os totais APENAS do bloco ICMSTot dentro de total
         if icms_tot_element is not None:
-            vProd = self.format_value(self.get_tag_value_from_parent(icms_tot_element, "vProd"))
-            vBC = self.format_value(self.get_tag_value_from_parent(icms_tot_element, "vBC"))
-            vICMS = self.format_value(self.get_tag_value_from_parent(icms_tot_element, "vICMS"))
-            vIPI = self.format_value(self.get_tag_value_from_parent(icms_tot_element, "vIPI"))
-            vBCST = self.format_value(self.get_tag_value_from_parent(icms_tot_element, "vBCST"))
-            vST = self.format_value(self.get_tag_value_from_parent(icms_tot_element, "vST"))
-            vNF = self.format_value(self.get_tag_value_from_parent(icms_tot_element, "vNF"))
+            v_prod = self.formatar_valor(self.obter_valor_tag_pai(icms_tot_element, "vProd"))
+            v_bc = self.formatar_valor(self.obter_valor_tag_pai(icms_tot_element, "vBC"))
+            v_icms = self.formatar_valor(self.obter_valor_tag_pai(icms_tot_element, "vICMS"))
+            v_ipi = self.formatar_valor(self.obter_valor_tag_pai(icms_tot_element, "vIPI"))
+            v_bcst = self.formatar_valor(self.obter_valor_tag_pai(icms_tot_element, "vBCST"))
+            v_st = self.formatar_valor(self.obter_valor_tag_pai(icms_tot_element, "vST"))
+            v_nf = self.formatar_valor(self.obter_valor_tag_pai(icms_tot_element, "vNF"))
         else:
-            # Fallback caso não encontre o bloco específico
-            vProd = self.format_value(self.get_tag_value(root, "vProd"))
-            vBC = self.format_value(self.get_tag_value(root, "vBC"))
-            vICMS = self.format_value(self.get_tag_value(root, "vICMS"))
-            vIPI = self.format_value(self.get_tag_value(root, "vIPI"))
-            vBCST = self.format_value(self.get_tag_value(root, "vBCST"))
-            vST = self.format_value(self.get_tag_value(root, "vST"))
-            vNF = self.format_value(self.get_tag_value(root, "vNF"))
+            v_prod = self.formatar_valor(self.obter_valor_tag(root, "vProd"))
+            v_bc = self.formatar_valor(self.obter_valor_tag(root, "vBC"))
+            v_icms = self.formatar_valor(self.obter_valor_tag(root, "vICMS"))
+            v_ipi = self.formatar_valor(self.obter_valor_tag(root, "vIPI"))
+            v_bcst = self.formatar_valor(self.obter_valor_tag(root, "vBCST"))
+            v_st = self.formatar_valor(self.obter_valor_tag(root, "vST"))
+            v_nf = self.formatar_valor(self.obter_valor_tag(root, "vNF"))
 
         return {
-            "nNF": nNF,
-            "serie": serie,
-            "dhEmi": dhEmi,
-            "chNFe": chNFe,
-            "cnpj_emit": cnpj_emit,
-            "xNome_emit": xNome_emit,
-            "ie_emit": ie_emit,
-            "cnpj_dest": cnpj_dest,
-            "xNome_dest": xNome_dest,
-            "xMun_dest": xMun_dest,
-            "vProd": vProd,
-            "vBC": vBC,
-            "vICMS": vICMS,
-            "vIPI": vIPI,
-            "vBCST": vBCST,
-            "vST": vST,
-            "vNF": vNF
+            "nNF": n_nf, "serie": serie, "dhEmi": dh_emi, "chNFe": ch_nfe,
+            "cnpj_emit": cnpj_emit, "xNome_emit": x_nome_emit, "ie_emit": ie_emit,
+            "cnpj_dest": cnpj_dest, "xNome_dest": x_nome_dest, "xMun_dest": x_mun_dest,
+            "vProd": v_prod, "vBC": v_bc, "vICMS": v_icms, "vIPI": v_ipi,
+            "vBCST": v_bcst, "vST": v_st, "vNF": v_nf
         }
 
-    def extract_duplicatas(self, root, ns):
+    def extrair_duplicatas(self, root: ET.Element) -> list[dict[str, Any]]:
         """Extrai todas as duplicatas da Nota Fiscal."""
-        duplicatas = []
-
-        # Busca todas as tags de duplicata
-        for dup in root.findall(".//ns:dup", ns):
-            nDup = self.get_tag_value(dup, "nDup")
-            dVenc = self.format_date_br(self.get_tag_value(dup, "dVenc"))
-            vDup = self.format_value(self.get_tag_value(dup, "vDup"))  # Mantém como float
-
-            duplicatas.append({
-                "nDup": nDup,
-                "dVenc": dVenc,
-                "vDup": vDup
-            })
-
+        duplicatas: list[dict[str, Any]] = []
+        for dup in root.findall(".//ns:dup", self._ns):
+            n_dup = self.obter_valor_tag(dup, "nDup")
+            d_venc = self.formatar_data_br(self.obter_valor_tag(dup, "dVenc"))
+            v_dup = self.formatar_valor(self.obter_valor_tag(dup, "vDup"))
+            duplicatas.append({"nDup": n_dup, "dVenc": d_venc, "vDup": v_dup})
         return duplicatas
 
-    def extract_products(self, root, ns):
-        """Extrai todos os produtos da Nota Fiscal (mantendo o código original)."""
-        produtos = []
-
-        for det in root.findall(".//ns:det", ns):
-            prod = det.find("ns:prod", ns)
-            imposto = det.find("ns:imposto", ns)
+    def extrair_produtos(self, root: ET.Element) -> list[dict[str, Any]]:
+        """Extrai todos os produtos da Nota Fiscal."""
+        produtos: list[dict[str, Any]] = []
+        for det in root.findall(".//ns:det", self._ns):
+            prod = det.find("ns:prod", self._ns)
+            imposto = det.find("ns:imposto", self._ns)
 
             if prod is not None:
                 item = {
-                    "CODIGO_PRODUTO": self.get_tag_value(prod, "cProd"),
-                    "EAN": self.get_tag_value(prod, "cEAN"),
-                    "DESCRIÇÃO": self.get_tag_value(prod, "xProd"),
-                    "NCM": self.get_tag_value(prod, "NCM"),
-                    "CEST": self.get_tag_value(prod, "CEST", ""),
-                    "CFOP": self.get_tag_value(prod, "CFOP"),
-                    "QUANTIDADE": self.format_value(self.get_tag_value(prod, "qCom")),
-                    "V.UNIT": self.format_value(self.get_tag_value(prod, "vUnCom")),
-                    "V.TOT": self.format_value(self.get_tag_value(prod, "vProd")),
-
-                    # Impostos (todos como float)
-                    "B.ICM": self.format_value(self.get_tag_value(imposto, "vBC") if imposto is not None else 0),
-                    "V.ICM": self.format_value(self.get_tag_value(imposto, "vICMS") if imposto is not None else 0),
-                    "AL.ICM": self.format_value(self.get_tag_value(imposto, "pICMS") if imposto is not None else 0),
-                    "MVA": self.format_value(self.get_tag_value(imposto, "pMVAST") if imposto is not None else 0),
-                    "B.ST": self.format_value(self.get_tag_value(imposto, "vBCST") if imposto is not None else 0),
-                    "ICMSTD": self.format_value(self.get_tag_value(imposto, "pICMSST") if imposto is not None else 0),
-                    "ST": self.format_value(self.get_tag_value(imposto, "vICMSST") if imposto is not None else 0),
-                    "V.IPI": self.format_value(self.get_tag_value(imposto, "vIPI") if imposto is not None else 0),
-                    "ALI.IPI": self.format_value(self.get_tag_value(imposto, "pIPI") if imposto is not None else 0),
+                    "CODIGO_PRODUTO": self.obter_valor_tag(prod, "cProd"),
+                    "EAN": self.obter_valor_tag(prod, "cEAN"),
+                    "DESCRIÇÃO": self.obter_valor_tag(prod, "xProd"),
+                    "NCM": self.obter_valor_tag(prod, "NCM"),
+                    "CEST": self.obter_valor_tag(prod, "CEST", ""),
+                    "CFOP": self.obter_valor_tag(prod, "CFOP"),
+                    "QUANTIDADE": self.formatar_valor(self.obter_valor_tag(prod, "qCom")),
+                    "V.UNIT": self.formatar_valor(self.obter_valor_tag(prod, "vUnCom")),
+                    "V.TOT": self.formatar_valor(self.obter_valor_tag(prod, "vProd")),
+                    "B.ICM": self.formatar_valor(self.obter_valor_tag(imposto, "vBC") if imposto else 0),
+                    "V.ICM": self.formatar_valor(self.obter_valor_tag(imposto, "vICMS") if imposto else 0),
+                    "AL.ICM": self.formatar_valor(self.obter_valor_tag(imposto, "pICMS") if imposto else 0),
+                    "MVA": self.formatar_valor(self.obter_valor_tag(imposto, "pMVAST") if imposto else 0),
+                    "B.ST": self.formatar_valor(self.obter_valor_tag(imposto, "vBCST") if imposto else 0),
+                    "ICMSTD": self.formatar_valor(self.obter_valor_tag(imposto, "pICMSST") if imposto else 0),
+                    "ST": self.formatar_valor(self.obter_valor_tag(imposto, "vICMSST") if imposto else 0),
+                    "V.IPI": self.formatar_valor(self.obter_valor_tag(imposto, "vIPI") if imposto else 0),
+                    "ALI.IPI": self.formatar_valor(self.obter_valor_tag(imposto, "pIPI") if imposto else 0),
                 }
                 produtos.append(item)
-
         return produtos
 
-    def apply_brazilian_number_format(self, writer, sheet_name, columns_to_format):
-        """Aplica formatação de número brasileiro (vírgula decimal) às colunas especificadas."""
-        workbook = writer.book
-        worksheet = writer.sheets[sheet_name]
 
-        # Formato brasileiro para números: #.##0,00
-        brazilian_format = numbers.FORMAT_NUMBER_COMMA_SEPARATED1  # Formato: #.##0,00
+class ServicoConversaoExcel:
+    """Gerencia a criação e formatação dos arquivos Excel gerados."""
+    
+    def __init__(self, logger: logging.Logger) -> None:
+        self._logger = logger
 
-        for column_name in columns_to_format:
-            if column_name in writer.df.columns:
-                # Encontra a coluna no Excel (letra da coluna)
-                col_idx = writer.df.columns.get_loc(column_name) + 1  # +1 porque Excel começa em 1
-                col_letter = openpyxl.utils.get_column_letter(col_idx)
+    def _aplicar_formatacao_br(self, worksheet: Any, num_linhas: int, colunas_indice: list[int]) -> None:
+        """Aplica formato brasileiro (vírgula decimal) em colunas de uma aba específica."""
+        if not openpyxl or not numbers:
+            return
+        formato_br = numbers.FORMAT_NUMBER_COMMA_SEPARATED1
+        for col_idx in colunas_indice:
+            letra_col = get_column_letter(col_idx)
+            for row in range(2, num_linhas + 2):
+                celula = worksheet[f"{letra_col}{row}"]
+                celula.number_format = formato_br
 
-                # Aplica o formato à coluna inteira (da linha 2 até o final)
-                for row in range(2, len(writer.df) + 2):
-                    cell = worksheet[f"{col_letter}{row}"]
-                    cell.number_format = brazilian_format
-
-    def create_excel_with_abas(self, nf_data, duplicatas, produtos, output_path):
-        """Cria um arquivo Excel com múltiplas abas e formatação brasileira."""
-        import openpyxl
-        from openpyxl.utils import get_column_letter
-
-        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-            # Aba 1: Dados Gerais da NF
-            df_geral = pd.DataFrame([{
-                "Número NF": nf_data["nNF"],
-                "Série": nf_data["serie"],
-                "Data Emissão": nf_data["dhEmi"],
-                "Chave NFe": nf_data["chNFe"],
-                "CNPJ Emitente": nf_data["cnpj_emit"],
-                "Nome Emitente": nf_data["xNome_emit"],
-                "IE Emitente": nf_data["ie_emit"],
-                "CNPJ Destinatário": nf_data["cnpj_dest"],
-                "Nome Destinatário": nf_data["xNome_dest"],
-                "Município Destinatário": nf_data["xMun_dest"],
-                "Valor Total Produtos": nf_data["vProd"],
-                "Base ICMS": nf_data["vBC"],
-                "Valor ICMS": nf_data["vICMS"],
-                "Valor IPI": nf_data["vIPI"],
-                "Base ICMS ST": nf_data["vBCST"],
-                "Valor ICMS ST": nf_data["vST"],
-                "Valor Total NF": nf_data["vNF"]
-            }])
+    def criar_excel_com_abas(self, df_geral: pd.DataFrame, df_dup: pd.DataFrame, df_prod: pd.DataFrame, caminho_saida: str) -> None:
+        """Gera arquivo Excel contendo até 3 abas."""
+        with pd.ExcelWriter(caminho_saida, engine='openpyxl') as writer:
             df_geral.to_excel(writer, sheet_name="Dados Gerais", index=False)
-
-            # Aplica formatação de números na aba Dados Gerais
-            geral_numeric_columns = [
+            
+            # Formatação Dados Gerais
+            colunas_geral = [
                 "Valor Total Produtos", "Base ICMS", "Valor ICMS",
                 "Valor IPI", "Base ICMS ST", "Valor ICMS ST", "Valor Total NF"
             ]
+            indices_geral = [df_geral.columns.get_loc(c) + 1 for c in colunas_geral if c in df_geral.columns]
+            self._aplicar_formatacao_br(writer.sheets["Dados Gerais"], len(df_geral), indices_geral)
 
-            workbook = writer.book
-            worksheet = writer.sheets["Dados Gerais"]
-            brazilian_format = numbers.FORMAT_NUMBER_COMMA_SEPARATED1
+            # Duplicatas
+            df_dup.to_excel(writer, sheet_name="Duplicatas", index=False)
+            if "Valor Duplicata" in df_dup.columns:
+                indices_dup = [df_dup.columns.get_loc("Valor Duplicata") + 1]
+                self._aplicar_formatacao_br(writer.sheets["Duplicatas"], len(df_dup), indices_dup)
+            elif "vDup" in df_dup.columns:
+                indices_dup = [df_dup.columns.get_loc("vDup") + 1]
+                self._aplicar_formatacao_br(writer.sheets["Duplicatas"], len(df_dup), indices_dup)
 
-            for col_name in geral_numeric_columns:
-                if col_name in df_geral.columns:
-                    col_idx = df_geral.columns.get_loc(col_name) + 1
-                    col_letter = get_column_letter(col_idx)
-                    cell = worksheet[f"{col_letter}2"]
-                    cell.number_format = brazilian_format
+            # Produtos
+            df_prod.to_excel(writer, sheet_name="Produtos", index=False)
+            colunas_prod = [
+                "QUANTIDADE", "V.UNIT", "V.TOT", "B.ICM", "V.ICM",
+                "AL.ICM", "MVA", "B.ST", "ICMSTD", "ST", "V.IPI", "ALI.IPI"
+            ]
+            indices_prod = [df_prod.columns.get_loc(c) + 1 for c in colunas_prod if c in df_prod.columns]
+            self._aplicar_formatacao_br(writer.sheets["Produtos"], len(df_prod), indices_prod)
 
-            # Aba 2: Duplicatas (se houver)
-            if duplicatas:
-                df_duplicatas = pd.DataFrame(duplicatas)
-                df_duplicatas.to_excel(writer, sheet_name="Duplicatas", index=False)
 
-                # Formata a coluna vDup como número
-                if 'vDup' in df_duplicatas.columns:
-                    worksheet_dup = writer.sheets["Duplicatas"]
-                    col_idx = df_duplicatas.columns.get_loc('vDup') + 1
-                    col_letter = get_column_letter(col_idx)
-                    for row in range(2, len(df_duplicatas) + 2):
-                        cell = worksheet_dup[f"{col_letter}{row}"]
-                        cell.number_format = brazilian_format
-            else:
-                df_vazio = pd.DataFrame({"Mensagem": ["Não há duplicatas registradas nesta NF"]})
-                df_vazio.to_excel(writer, sheet_name="Duplicatas", index=False)
+class ProcessadorNFe:
+    """Orquestra a conversão de XML para Excel."""
+    
+    def __init__(self, logger: logging.Logger) -> None:
+        self._logger = logger
+        self._extrator = ServicoExtracaoNFe(logger)
+        self._excel = ServicoConversaoExcel(logger)
 
-            # Aba 3: Produtos
-            if produtos:
-                df_produtos = pd.DataFrame(produtos)
-                df_produtos.to_excel(writer, sheet_name="Produtos", index=False)
-
-                # Formata todas as colunas numéricas na aba Produtos
-                produtos_numeric_columns = [
-                    "QUANTIDADE", "V.UNIT", "V.TOT", "B.ICM", "V.ICM",
-                    "AL.ICM", "MVA", "B.ST", "ICMSTD", "ST", "V.IPI", "ALI.IPI"
-                ]
-
-                worksheet_prod = writer.sheets["Produtos"]
-
-                for col_name in produtos_numeric_columns:
-                    if col_name in df_produtos.columns:
-                        col_idx = df_produtos.columns.get_loc(col_name) + 1
-                        col_letter = get_column_letter(col_idx)
-                        for row in range(2, len(df_produtos) + 2):
-                            cell = worksheet_prod[f"{col_letter}{row}"]
-                            cell.number_format = brazilian_format
-            else:
-                df_vazio = pd.DataFrame({"Mensagem": ["Não há produtos registrados nesta NF"]})
-                df_vazio.to_excel(writer, sheet_name="Produtos", index=False)
-
-    def process_individual_xml(self, xml_path, export_folder, file_name):
-        """Processa um único XML e cria um Excel específico para ele."""
+    def processar_individual(self, caminho_xml: str, diretorio_saida: str) -> str:
+        """Lê um XML e gera um Excel correspondente. Retorna o nome do arquivo gerado."""
         try:
-            tree = ET.parse(xml_path)
+            tree = ET.parse(caminho_xml)
             root = tree.getroot()
-            ns = {'ns': 'http://www.portalfiscal.inf.br/nfe'}
 
-            # Extrai dados
-            nf_data = self.extract_nf_data(root, ns)
-            duplicatas = self.extract_duplicatas(root, ns)
-            produtos = self.extract_products(root, ns)
+            nf_data = self._extrator.extrair_dados_gerais(root)
+            duplicatas = self._extrator.extrair_duplicatas(root)
+            produtos = self._extrator.extrair_produtos(root)
 
-            # Gera nome do arquivo: nNF + xNome_emit
-            nNF = nf_data.get("nNF", "SEM_NUMERO")
-            xNome_emit = nf_data.get("xNome_emit", "SEM_NOME")
+            n_nf = nf_data.get("nNF", "SEM_NUMERO")
+            nome_emit = nf_data.get("xNome_emit", "SEM_NOME")
+            nome_emit_limpo = "".join(c for c in nome_emit if c.isalnum() or c in (' ', '-', '_')).strip()
 
-            # Remove caracteres inválidos para nome de arquivo
-            xNome_emit = "".join(c for c in xNome_emit if c.isalnum() or c in (' ', '-', '_')).strip()
+            nome_arquivo = f"{n_nf}_{nome_emit_limpo}.xlsx"
+            caminho_saida = os.path.join(diretorio_saida, nome_arquivo)
 
-            output_filename = f"{nNF}_{xNome_emit}.xlsx"
-            output_path = os.path.join(export_folder, output_filename)
+            df_geral = pd.DataFrame([{
+                "Número NF": nf_data["nNF"], "Série": nf_data["serie"],
+                "Data Emissão": nf_data["dhEmi"], "Chave NFe": nf_data["chNFe"],
+                "CNPJ Emitente": nf_data["cnpj_emit"], "Nome Emitente": nf_data["xNome_emit"],
+                "IE Emitente": nf_data["ie_emit"], "CNPJ Destinatário": nf_data["cnpj_dest"],
+                "Nome Destinatário": nf_data["xNome_dest"], "Município Destinatário": nf_data["xMun_dest"],
+                "Valor Total Produtos": nf_data["vProd"], "Base ICMS": nf_data["vBC"],
+                "Valor ICMS": nf_data["vICMS"], "Valor IPI": nf_data["vIPI"],
+                "Base ICMS ST": nf_data["vBCST"], "Valor ICMS ST": nf_data["vST"],
+                "Valor Total NF": nf_data["vNF"]
+            }])
 
-            # Cria Excel com abas
-            self.create_excel_with_abas(nf_data, duplicatas, produtos, output_path)
+            df_dup = pd.DataFrame(duplicatas) if duplicatas else pd.DataFrame({"Mensagem": ["Sem duplicatas"]})
+            df_prod = pd.DataFrame(produtos) if produtos else pd.DataFrame({"Mensagem": ["Sem produtos"]})
 
-            return True, output_filename
-        except Exception as e:
-            return False, str(e)
+            self._excel.criar_excel_com_abas(df_geral, df_dup, df_prod, caminho_saida)
+            return nome_arquivo
 
-    def process_unico_excel(self, xml_files, xml_folder, export_folder):
-        """Processa múltiplos XMLs e cria um único Excel com abas separadas por NF."""
+        except Exception as erro:
+            self._logger.exception("Falha ao processar arquivo %s", caminho_xml)
+            raise ErroConversao(f"Erro ao processar: {erro}") from erro
+
+    def processar_unico(self, arquivos_xml: list[str], dir_xml: str, dir_saida: str, callback_progresso: Callable[[float, str], None]) -> str:
+        """Gera um único Excel contendo as informações de múltiplos XMLs."""
         try:
-            output_path = os.path.join(export_folder, "Relatorio_NFe_Completo.xlsx")
-            import openpyxl
-            from openpyxl.utils import get_column_letter
+            caminho_saida = os.path.join(dir_saida, "Relatorio_NFe_Completo.xlsx")
+            
+            todos_geral: list[dict[str, Any]] = []
+            todos_dup: list[dict[str, Any]] = []
+            todos_prod: list[dict[str, Any]] = []
 
-            with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-                all_geral_data = []
-                all_duplicatas_data = []
-                all_produtos_data = []
+            for index, arquivo in enumerate(arquivos_xml):
+                caminho_xml = os.path.join(dir_xml, arquivo)
+                tree = ET.parse(caminho_xml)
+                root = tree.getroot()
 
-                for index, file in enumerate(xml_files):
-                    xml_path = os.path.join(xml_folder, file)
-                    tree = ET.parse(xml_path)
-                    root = tree.getroot()
-                    ns = {'ns': 'http://www.portalfiscal.inf.br/nfe'}
+                nf_data = self._extrator.extrair_dados_gerais(root)
+                duplicatas = self._extrator.extrair_duplicatas(root)
+                produtos = self._extrator.extrair_produtos(root)
 
-                    # Extrai dados
-                    nf_data = self.extract_nf_data(root, ns)
-                    duplicatas = self.extract_duplicatas(root, ns)
-                    produtos = self.extract_products(root, ns)
+                identificador = f"NF {nf_data['nNF']} - {nf_data['xNome_emit']}"
 
-                    # Adiciona identificador da NF
-                    identificador = f"NF {nf_data['nNF']} - {nf_data['xNome_emit']}"
+                geral_row = {
+                    "Identificador": identificador, "Número NF": nf_data["nNF"], "Série": nf_data["serie"],
+                    "Data Emissão": nf_data["dhEmi"], "Chave NFe": nf_data["chNFe"],
+                    "CNPJ Emitente": nf_data["cnpj_emit"], "Nome Emitente": nf_data["xNome_emit"],
+                    "IE Emitente": nf_data["ie_emit"], "CNPJ Destinatário": nf_data["cnpj_dest"],
+                    "Nome Destinatário": nf_data["xNome_dest"], "Município Destinatário": nf_data["xMun_dest"],
+                    "Valor Total Produtos": nf_data["vProd"], "Base ICMS": nf_data["vBC"],
+                    "Valor ICMS": nf_data["vICMS"], "Valor IPI": nf_data["vIPI"],
+                    "Base ICMS ST": nf_data["vBCST"], "Valor ICMS ST": nf_data["vST"],
+                    "Valor Total NF": nf_data["vNF"]
+                }
+                todos_geral.append(geral_row)
 
-                    # Prepara dados gerais (mantém como float)
-                    geral_row = {
-                        "Identificador": identificador,
-                        "Número NF": nf_data["nNF"],
-                        "Série": nf_data["serie"],
-                        "Data Emissão": nf_data["dhEmi"],
-                        "Chave NFe": nf_data["chNFe"],
-                        "CNPJ Emitente": nf_data["cnpj_emit"],
-                        "Nome Emitente": nf_data["xNome_emit"],
-                        "IE Emitente": nf_data["ie_emit"],
-                        "CNPJ Destinatário": nf_data["cnpj_dest"],
-                        "Nome Destinatário": nf_data["xNome_dest"],
-                        "Município Destinatário": nf_data["xMun_dest"],
-                        "Valor Total Produtos": nf_data["vProd"],
-                        "Base ICMS": nf_data["vBC"],
-                        "Valor ICMS": nf_data["vICMS"],
-                        "Valor IPI": nf_data["vIPI"],
-                        "Base ICMS ST": nf_data["vBCST"],
-                        "Valor ICMS ST": nf_data["vST"],
-                        "Valor Total NF": nf_data["vNF"]
+                for dup in duplicatas:
+                    dup_row = {
+                        "Identificador": identificador, "Número NF": nf_data["nNF"],
+                        "Nome Emitente": nf_data["xNome_emit"], "Número Duplicata": dup["nDup"],
+                        "Vencimento": dup["dVenc"], "Valor Duplicata": dup["vDup"]
                     }
-                    all_geral_data.append(geral_row)
+                    todos_dup.append(dup_row)
 
-                    # Prepara duplicatas
-                    for dup in duplicatas:
-                        dup_row = {
-                            "Identificador": identificador,
-                            "Número NF": nf_data["nNF"],
-                            "Nome Emitente": nf_data["xNome_emit"],
-                            "Número Duplicata": dup["nDup"],
-                            "Vencimento": dup["dVenc"],
-                            "Valor Duplicata": dup["vDup"]  # Mantém como float
-                        }
-                        all_duplicatas_data.append(dup_row)
+                for prod in produtos:
+                    prod_row = {
+                        "Identificador": identificador, "Número NF": nf_data["nNF"],
+                        "Nome Emitente": nf_data["xNome_emit"]
+                    }
+                    prod_row.update(prod)
+                    todos_prod.append(prod_row)
 
-                    # Prepara produtos
-                    for prod in produtos:
-                        prod_row = {
-                            "Identificador": identificador,
-                            "Número NF": nf_data["nNF"],
-                            "Nome Emitente": nf_data["xNome_emit"],
-                            "CODIGO_PRODUTO": prod.get("CODIGO_PRODUTO", ""),
-                            "EAN": prod.get("EAN", ""),
-                            "DESCRIÇÃO": prod.get("DESCRIÇÃO", ""),
-                            "NCM": prod.get("NCM", ""),
-                            "CEST": prod.get("CEST", ""),
-                            "CFOP": prod.get("CFOP", ""),
-                            "QUANTIDADE": prod.get("QUANTIDADE", 0.0),
-                            "V.UNIT": prod.get("V.UNIT", 0.0),
-                            "V.TOT": prod.get("V.TOT", 0.0),
-                            "B.ICM": prod.get("B.ICM", 0.0),
-                            "V.ICM": prod.get("V.ICM", 0.0),
-                            "AL.ICM": prod.get("AL.ICM", 0.0),
-                            "MVA": prod.get("MVA", 0.0),
-                            "B.ST": prod.get("B.ST", 0.0),
-                            "ICMSTD": prod.get("ICMSTD", 0.0),
-                            "ST": prod.get("ST", 0.0),
-                            "V.IPI": prod.get("V.IPI", 0.0),
-                            "ALI.IPI": prod.get("ALI.IPI", 0.0)
-                        }
-                        all_produtos_data.append(prod_row)
+                # Atualiza interface
+                progresso = (index + 1) / len(arquivos_xml)
+                callback_progresso(progresso, f"Processando: {index + 1}/{len(arquivos_xml)} - {arquivo}")
 
-                    # Atualiza progresso
-                    progress = (index + 1) / len(xml_files)
-                    self.progress_bar.set(progress)
-                    self.status_label.configure(text=f"Processando: {index + 1} de {len(xml_files)} - {file}")
+            df_geral = pd.DataFrame(todos_geral)
+            df_dup = pd.DataFrame(todos_dup) if todos_dup else pd.DataFrame({"Mensagem": ["Sem duplicatas"]})
+            df_prod = pd.DataFrame(todos_prod) if todos_prod else pd.DataFrame({"Mensagem": ["Sem produtos"]})
 
-                # Cria as abas no Excel único
-                df_geral = pd.DataFrame(all_geral_data)
-                df_geral.to_excel(writer, sheet_name="Dados Gerais", index=False)
+            self._excel.criar_excel_com_abas(df_geral, df_dup, df_prod, caminho_saida)
+            return "Relatorio_NFe_Completo.xlsx"
 
-                # Formata números na aba Dados Gerais
-                brazilian_format = numbers.FORMAT_NUMBER_COMMA_SEPARATED1
-                geral_numeric_cols = ["Valor Total Produtos", "Base ICMS", "Valor ICMS",
-                                      "Valor IPI", "Base ICMS ST", "Valor ICMS ST", "Valor Total NF"]
+        except Exception as erro:
+            self._logger.exception("Falha ao processar relatório único")
+            raise ErroConversao(f"Erro ao processar relatório único: {erro}") from erro
 
-                worksheet_geral = writer.sheets["Dados Gerais"]
-                for col_name in geral_numeric_cols:
-                    if col_name in df_geral.columns:
-                        col_idx = df_geral.columns.get_loc(col_name) + 1
-                        col_letter = get_column_letter(col_idx)
-                        for row in range(2, len(df_geral) + 2):
-                            cell = worksheet_geral[f"{col_letter}{row}"]
-                            cell.number_format = brazilian_format
 
-                # Aba de Duplicatas
-                if all_duplicatas_data:
-                    df_duplicatas = pd.DataFrame(all_duplicatas_data)
-                    df_duplicatas.to_excel(writer, sheet_name="Duplicatas", index=False)
+# =============================================================================
+# INTERFACE (UI)
+# =============================================================================
 
-                    worksheet_dup = writer.sheets["Duplicatas"]
-                    if "Valor Duplicata" in df_duplicatas.columns:
-                        col_idx = df_duplicatas.columns.get_loc("Valor Duplicata") + 1
-                        col_letter = get_column_letter(col_idx)
-                        for row in range(2, len(df_duplicatas) + 2):
-                            cell = worksheet_dup[f"{col_letter}{row}"]
-                            cell.number_format = brazilian_format
+class InterfaceConversor(ctk.CTk):
+    """Janela principal da aplicação, utilizando CustomTkinter de forma isolada."""
 
-                # Aba de Produtos
-                if all_produtos_data:
-                    df_produtos = pd.DataFrame(all_produtos_data)
-                    df_produtos.to_excel(writer, sheet_name="Produtos", index=False)
+    def __init__(self) -> None:
+        super().__init__()
+        
+        # Configuração Básica
+        self.title("Conversor NFe XML para Excel")
+        self.geometry("700x550")
+        self.resizable(False, False)
+        self.configure(fg_color=FUNDO_PRINCIPAL)
 
-                    produtos_numeric_cols = ["QUANTIDADE", "V.UNIT", "V.TOT", "B.ICM", "V.ICM",
-                                             "AL.ICM", "MVA", "B.ST", "ICMSTD", "ST", "V.IPI", "ALI.IPI"]
+        # Threading e Comunicação
+        self._fila_ui: queue.Queue[dict[str, Any]] = queue.Queue()
+        self._processador = ProcessadorNFe(logger)
+        self._processando = False
 
-                    worksheet_prod = writer.sheets["Produtos"]
-                    for col_name in produtos_numeric_cols:
-                        if col_name in df_produtos.columns:
-                            col_idx = df_produtos.columns.get_loc(col_name) + 1
-                            col_letter = get_column_letter(col_idx)
-                            for row in range(2, len(df_produtos) + 2):
-                                cell = worksheet_prod[f"{col_letter}{row}"]
-                                cell.number_format = brazilian_format
+        # Variáveis de Estado
+        self.var_xml_dir = ctk.StringVar()
+        self.var_export_dir = ctk.StringVar()
+        self.var_processo_opt = ctk.StringVar(value="individual")
 
-            return True, "Relatorio_NFe_Completo.xlsx"
+        self._configurar_grid()
+        self._construir_interface()
+        self._iniciar_loop_fila()
+
+    def _configurar_grid(self) -> None:
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(0, weight=1) # Conteudo
+        self.grid_rowconfigure(1, weight=0) # Rodapé
+
+    def _construir_interface(self) -> None:
+        # Frame Principal Elevado
+        frame_main = ctk.CTkFrame(self, fg_color=SUPERFICIE, corner_radius=RAIO_BORDA)
+        frame_main.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
+        frame_main.grid_columnconfigure(0, weight=1)
+
+        # Cabeçalho
+        lbl_titulo = ctk.CTkLabel(
+            frame_main, text="Extrator de Dados NFe (Mod 55)",
+            font=ctk.CTkFont(size=22, weight="bold"), text_color=OURO_PRINCIPAL
+        )
+        lbl_titulo.grid(row=0, column=0, pady=(20, 10))
+
+        lbl_desc = ctk.CTkLabel(
+            frame_main, text="Selecione os diretórios e o modo de conversão.",
+            font=ctk.CTkFont(size=14), text_color=TEXTO_SECUNDARIO
+        )
+        lbl_desc.grid(row=1, column=0, pady=(0, 20))
+
+        # Configurações de Diretório
+        frame_dir = ctk.CTkFrame(frame_main, fg_color="transparent")
+        frame_dir.grid(row=2, column=0, sticky="ew", padx=20, pady=10)
+        frame_dir.grid_columnconfigure(1, weight=1)
+
+        # XML
+        btn_xml = ctk.CTkButton(
+            frame_dir, text="Pasta XML", width=120,
+            fg_color=BORDA_FORTE, hover_color=BORDA_SUTIL, text_color=TEXTO_DESTAQUE,
+            command=self._selecionar_pasta_xml
+        )
+        btn_xml.grid(row=0, column=0, padx=(0, 10), pady=5)
+        
+        entry_xml = ctk.CTkEntry(
+            frame_dir, textvariable=self.var_xml_dir,
+            fg_color=FUNDO_PRINCIPAL, border_color=BORDA_FORTE, text_color=TEXTO_PRIMARIO
+        )
+        entry_xml.grid(row=0, column=1, sticky="ew", pady=5)
+        entry_xml.configure(state="readonly")
+
+        # Destino
+        btn_destino = ctk.CTkButton(
+            frame_dir, text="Destino", width=120,
+            fg_color=BORDA_FORTE, hover_color=BORDA_SUTIL, text_color=TEXTO_DESTAQUE,
+            command=self._selecionar_pasta_destino
+        )
+        btn_destino.grid(row=1, column=0, padx=(0, 10), pady=5)
+
+        entry_destino = ctk.CTkEntry(
+            frame_dir, textvariable=self.var_export_dir,
+            fg_color=FUNDO_PRINCIPAL, border_color=BORDA_FORTE, text_color=TEXTO_PRIMARIO
+        )
+        entry_destino.grid(row=1, column=1, sticky="ew", pady=5)
+        entry_destino.configure(state="readonly")
+
+        # Opções de Processamento
+        frame_opt = ctk.CTkFrame(frame_main, fg_color=FUNDO_PRINCIPAL, corner_radius=RAIO_BORDA)
+        frame_opt.grid(row=3, column=0, sticky="ew", padx=20, pady=15)
+        
+        lbl_opt = ctk.CTkLabel(frame_opt, text="Modo de Saída:", font=ctk.CTkFont(weight="bold"), text_color=TEXTO_DESTAQUE)
+        lbl_opt.pack(pady=(10, 5))
+
+        rb_indiv = ctk.CTkRadioButton(
+            frame_opt, text="Um Excel por XML", variable=self.var_processo_opt, value="individual",
+            text_color=TEXTO_PRIMARIO, fg_color=ESMERALDA_PRIMARIA, hover_color=ESMERALDA_DEEP
+        )
+        rb_indiv.pack(side="left", expand=True, pady=(0, 10))
+
+        rb_unico = ctk.CTkRadioButton(
+            frame_opt, text="Único Excel Combinado", variable=self.var_processo_opt, value="unico",
+            text_color=TEXTO_PRIMARIO, fg_color=ESMERALDA_PRIMARIA, hover_color=ESMERALDA_DEEP
+        )
+        rb_unico.pack(side="right", expand=True, pady=(0, 10))
+
+        # Controles
+        self.barra_progresso = ctk.CTkProgressBar(
+            frame_main, progress_color=ESMERALDA_PRIMARIA, fg_color=BORDA_FORTE, height=8
+        )
+        self.barra_progresso.grid(row=4, column=0, sticky="ew", padx=20, pady=(20, 10))
+        self.barra_progresso.set(0)
+
+        self.lbl_status = ctk.CTkLabel(
+            frame_main, text="Aguardando configuração...",
+            font=ctk.CTkFont(size=12), text_color=TEXTO_SECUNDARIO
+        )
+        self.lbl_status.grid(row=5, column=0, pady=(0, 10))
+
+        self.btn_iniciar = ctk.CTkButton(
+            frame_main, text="Iniciar Conversão", height=40,
+            fg_color=ESMERALDA_PRIMARIA, hover_color=ESMERALDA_DEEP,
+            font=ctk.CTkFont(weight="bold", size=14),
+            command=self._iniciar_processamento
+        )
+        self.btn_iniciar.grid(row=6, column=0, pady=(10, 20), padx=40, sticky="ew")
+
+        # Rodapé
+        rodape = ctk.CTkLabel(
+            self, text="Roberto Santos [LABS]©", font=ctk.CTkFont(size=10), text_color=TEXTO_SECUNDARIO
+        )
+        rodape.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 8))
+
+    def _selecionar_pasta_xml(self) -> None:
+        caminho = filedialog.askdirectory(title="Selecione a pasta com arquivos XML")
+        if caminho:
+            self.var_xml_dir.set(caminho)
+
+    def _selecionar_pasta_destino(self) -> None:
+        caminho = filedialog.askdirectory(title="Selecione o destino para os Excel")
+        if caminho:
+            self.var_export_dir.set(caminho)
+
+    def _iniciar_loop_fila(self) -> None:
+        """Processa as mensagens vindas das threads em background."""
+        try:
+            while True:
+                msg = self._fila_ui.get_nowait()
+                self._tratar_mensagem(msg)
+        except queue.Empty:
+            pass
+        self.after(50, self._iniciar_loop_fila)
+
+    def _tratar_mensagem(self, msg: dict[str, Any]) -> None:
+        tipo = msg.get("tipo")
+        
+        if tipo == "progresso":
+            valor = msg.get("valor", 0.0)
+            texto = msg.get("texto", "")
+            self.barra_progresso.set(valor)
+            self.lbl_status.configure(text=texto, text_color=TEXTO_SECUNDARIO)
+            
+        elif tipo == "sucesso":
+            texto = msg.get("texto", "Concluído")
+            self.lbl_status.configure(text=texto, text_color=ESMERALDA_SUCESSO)
+            self._restaurar_estado_inicial()
+            messagebox.showinfo("Sucesso", msg.get("detalhe", texto))
+            
+        elif tipo == "erro":
+            texto = msg.get("texto", "Falha")
+            self.lbl_status.configure(text=texto, text_color=ERRO)
+            self.barra_progresso.set(0)
+            self._restaurar_estado_inicial()
+            messagebox.showerror("Erro", msg.get("detalhe", texto))
+
+    def _restaurar_estado_inicial(self) -> None:
+        self._processando = False
+        self.btn_iniciar.configure(state="normal", text="Iniciar Conversão")
+        self.barra_progresso.configure(mode="determinate")
+
+    def _iniciar_processamento(self) -> None:
+        if self._processando:
+            return
+            
+        dir_xml = self.var_xml_dir.get()
+        dir_destino = self.var_export_dir.get()
+        modo = self.var_processo_opt.get()
+
+        if not dir_xml or not dir_destino:
+            self._fila_ui.put({"tipo": "erro", "texto": "Selecione as pastas primeiro.", "detalhe": "Diretório de origem ou destino não selecionado."})
+            return
+
+        try:
+            arquivos = [f for f in os.listdir(dir_xml) if f.lower().endswith(".xml")]
         except Exception as e:
-            return False, str(e)
-
-    def process_xmls(self):
-        """Método principal que processa os XMLs conforme opção selecionada."""
-        xml_folder = self.xml_dir.get()
-        export_folder = self.export_dir.get()
-        process_option = self.process_option.get()
-
-        if not xml_folder or not export_folder:
-            messagebox.showwarning("Erro", "Por favor, selecione ambas as pastas.")
+            self._fila_ui.put({"tipo": "erro", "texto": "Erro ao ler diretório.", "detalhe": str(e)})
             return
 
-        files = [f for f in os.listdir(xml_folder) if f.endswith('.xml')]
-        if not files:
-            messagebox.showwarning("Erro", "Nenhum arquivo XML encontrado na pasta.")
+        if not arquivos:
+            self._fila_ui.put({"tipo": "erro", "texto": "Nenhum XML encontrado.", "detalhe": "A pasta selecionada não contém arquivos XML."})
             return
 
-        total_files = len(files)
-        success_count = 0
-        error_count = 0
-        errors_list = []
+        self._processando = True
+        self.btn_iniciar.configure(state="disabled", text="Processando...")
+        self.barra_progresso.set(0)
 
-        if process_option == "individual":
-            # Processa cada XML individualmente
-            for index, file in enumerate(files):
-                xml_path = os.path.join(xml_folder, file)
-                self.status_label.configure(text=f"Processando: {file}")
+        threading.Thread(
+            target=self._executar_conversao,
+            args=(arquivos, dir_xml, dir_destino, modo),
+            daemon=True
+        ).start()
 
-                success, result = self.process_individual_xml(xml_path, export_folder, file)
+    def _executar_conversao(self, arquivos: list[str], dir_xml: str, dir_destino: str, modo: str) -> None:
+        logger.info("Iniciando conversão de %d arquivos no modo %s", len(arquivos), modo)
+        
+        sucessos = 0
+        erros_log = []
 
-                if success:
-                    success_count += 1
+        try:
+            if modo == "individual":
+                for i, arquivo in enumerate(arquivos):
+                    caminho_completo = os.path.join(dir_xml, arquivo)
+                    self._fila_ui.put({
+                        "tipo": "progresso",
+                        "valor": (i + 1) / len(arquivos),
+                        "texto": f"Processando: {i + 1}/{len(arquivos)} - {arquivo}"
+                    })
+                    
+                    try:
+                        self._processador.processar_individual(caminho_completo, dir_destino)
+                        sucessos += 1
+                    except Exception as e:
+                        erros_log.append(f"{arquivo}: {e}")
+
+                if erros_log:
+                    detalhes = f"Sucesso: {sucessos} | Erros: {len(erros_log)}\n" + "\n".join(erros_log[:5])
+                    tipo = "erro" if sucessos == 0 else "sucesso"
+                    self._fila_ui.put({"tipo": tipo, "texto": "Processamento com ressalvas.", "detalhe": detalhes})
                 else:
-                    error_count += 1
-                    errors_list.append(f"{file}: {result}")
+                    self._fila_ui.put({"tipo": "sucesso", "texto": "Todos os arquivos processados!", "detalhe": f"{sucessos} arquivos convertidos com sucesso."})
 
-                # Atualiza progresso
-                progress = (index + 1) / total_files
-                self.progress_bar.set(progress)
+            elif modo == "unico":
+                def callback_progresso(valor: float, texto: str) -> None:
+                    self._fila_ui.put({"tipo": "progresso", "valor": valor, "texto": texto})
+                
+                self._fila_ui.put({"tipo": "progresso", "valor": 0, "texto": "Preparando relatório único..."})
+                nome_saida = self._processador.processar_unico(arquivos, dir_xml, dir_destino, callback_progresso)
+                self._fila_ui.put({"tipo": "sucesso", "texto": "Relatório unificado gerado!", "detalhe": f"Arquivo {nome_saida} salvo com sucesso."})
 
-            # Mensagem final
-            msg = f"Processamento concluído!\n\nSucesso: {success_count} arquivos\nErros: {error_count}"
-            if errors_list:
-                msg += f"\n\nErros:\n" + "\n".join(errors_list[:5])
-                if len(errors_list) > 5:
-                    msg += f"\n... e mais {len(errors_list) - 5} erros"
+        except Exception as e:
+            logger.exception("Falha fatal na thread de processamento.")
+            self._fila_ui.put({"tipo": "erro", "texto": "Erro crítico no processo.", "detalhe": str(e)})
 
-            messagebox.showinfo("Concluído", msg)
 
-        else:  # process_option == "unico"
-            self.status_label.configure(text="Processando arquivos para Excel único...")
-            success, result = self.process_unico_excel(files, xml_folder, export_folder)
+# =============================================================================
+# INICIALIZAÇÃO
+# =============================================================================
 
-            if success:
-                messagebox.showinfo("Sucesso", f"Arquivo Excel único criado com sucesso!\n\n{result}")
-            else:
-                messagebox.showerror("Erro", f"Falha ao processar:\n{result}")
-
-        self.status_label.configure(text="Concluído!")
-        self.progress_bar.set(0)
-
-    def start_thread(self):
-        # Roda o processamento em background para não travar a interface
-        thread = threading.Thread(target=self.process_xmls)
-        thread.daemon = True
-        thread.start()
+def main() -> None:
+    # Configuração global CustomTkinter
+    ctk.set_appearance_mode("system")
+    ctk.set_default_color_theme("blue")
+    
+    logger.info("Iniciando aplicação NFe to Excel.")
+    try:
+        app = InterfaceConversor()
+        app.mainloop()
+    except Exception:
+        logger.exception("Erro não tratado que causou o fechamento da aplicação.")
 
 if __name__ == "__main__":
-    app = App()
-    app.mainloop()
-
+    main()

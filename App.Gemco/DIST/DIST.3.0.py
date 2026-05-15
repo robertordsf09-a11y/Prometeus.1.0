@@ -1,81 +1,77 @@
-import sys
+from __future__ import annotations
+
 import logging
-import tkinter as tk
+import os
+import queue
+import sys
+import threading
+import time
+import traceback
+from dataclasses import dataclass, field
+from datetime import datetime
+from logging.handlers import RotatingFileHandler
+from typing import Any, Callable
+
+import customtkinter as ctk
 import pandas as pd
 import pyautogui
-import customtkinter as ctk
-from tkinter import messagebox, filedialog
-from PIL import Image, ImageTk
-import time
-from datetime import datetime
-import os
-import traceback
+from tkinter import filedialog, messagebox
 
 
 # =============================================================================
-# LICENSE MANAGER (Lógica Original Preservada)
+# CAMINHOS E PORTABILIDADE
 # =============================================================================
-class LicenseManager:
-    @staticmethod
-    def verificar_licenca() -> bool:
-        data_expiracao_str = "15/06/2026"
-        try:
-            data_expiracao = datetime.strptime(data_expiracao_str, "%d/%m/%Y").date()
-            if datetime.now().date() <= data_expiracao:
-                return True
-            LicenseManager._alerta(data_expiracao_str)
-            return False
-        except Exception as e:
-            logging.error(f"Erro na validação de licença: {e}")
-            return False
+def obter_diretorio_base() -> str:
+    """
+    Retorna o diretório raiz da aplicação.
 
-    @staticmethod
-    def _alerta(data: str) -> None:
-        root = tk.Tk()
-        root.withdraw()
-        messagebox.showwarning("Licença Expirada", f"Acesso encerrado em {data}.")
-        root.destroy()
-        sys.exit(0)
+    Compatível com execução direta (.py) e executável compilado via Nuitka.
+    Nunca use __file__ diretamente fora desta função.
+    """
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
 
 
-# --- CONFIGURAÇÕES DE CAMINHO ---
-# Determina o diretório onde o .exe ou o script está localizado
-if getattr(sys, "frozen", False) or "__compiled__" in globals():
-    # Caminho do executável (.exe)
-    BASE_DIR = os.path.dirname(os.path.abspath(sys.argv[0]))
-else:
-    # Caminho do script (.py)
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-PASTA_IMAGENS = BASE_DIR
-
-
-def obter_caminho(nome_arquivo: str) -> str:
-    """Retorna o caminho absoluto do arquivo dentro da pasta do sistema."""
-    return os.path.normpath(os.path.join(PASTA_IMAGENS, nome_arquivo))
+BASE_DIR: str = obter_diretorio_base()
 
 
 # =============================================================================
-# PALETA "EMERALD GOTHIC GOLD"
+# SISTEMA DE LOGS
 # =============================================================================
-# Cores baseadas na preferência "Gótico chic gold/emerald"
-BG_DEEP = "#0F0F0F"  # Preto absoluto
-BG_FRAME = "#1A1A1A"  # Grafite escuro
-EMERALD = "#044D35"  # Verde esmeralda vibrante
-EMERALD_HVR = "#06704D"  # Hover esmeralda
-GOLD = "#C5A059"  # Ouro metálico
-TEXT_MAIN = "#E0E0E0"  # Branco acinzentado
-TEXT_MUTED = "#888888"  # Cinza legendas
+def criar_logger(nome_modulo: str, usuario: str = "sistema") -> logging.Logger:
+    """
+    Cria logger configurado com formato padrão e rotação de arquivo.
 
-ctk.set_appearance_mode("dark")
+    Salva logs em BASE_DIR/logs/aplicacao.log com rotação a cada 5 MB,
+    mantendo até 3 arquivos históricos.
+    """
+    formato = f"[%(asctime)s],[{usuario}],[{nome_modulo}] %(levelname)s: %(message)s"
+    formatador = logging.Formatter(formato, datefmt="%Y-%m-%d %H:%M:%S")
+
+    caminho_log = os.path.join(BASE_DIR, "logs", "aplicacao.log")
+    os.makedirs(os.path.dirname(caminho_log), exist_ok=True)
+
+    handler_arquivo = RotatingFileHandler(
+        caminho_log, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+    )
+    handler_arquivo.setFormatter(formatador)
+
+    handler_console = logging.StreamHandler()
+    handler_console.setFormatter(formatador)
+
+    logger = logging.getLogger(nome_modulo)
+    logger.setLevel(logging.INFO)
+    logger.addHandler(handler_arquivo)
+    logger.addHandler(handler_console)
+    return logger
 
 
-# =============================================================================
-# FUNÇÕES DE APOIO (LOG E FORMATAÇÃO)
-# =============================================================================
-def registrar_log(
-    usuario: str, mensagem: str, coluna: str = "", valor: str = ""
-) -> None:
+logger = criar_logger("dist")
+
+
+def registrar_log(usuario: str, mensagem: str, coluna: str = "", valor: str = "") -> None:
+    """Registra uma entrada simples de log da automação no arquivo antigo (retrocompatibilidade) e no novo."""
     data_hora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
     log_entry = (
         f"[{data_hora}] Usuário: {usuario} | Coluna: {coluna} "
@@ -85,11 +81,13 @@ def registrar_log(
         caminho_log = os.path.join(BASE_DIR, "log_automacao.txt")
         with open(caminho_log, "a", encoding="utf-8") as f:
             f.write(log_entry)
-    except Exception as e:
-        print(f"Erro ao gravar log: {e}")
+        logger.info("Log registrado: %s | col: %s | val: %s", mensagem, coluna, valor)
+    except Exception:
+        logger.exception("registrar_log | Falha ao gravar log no arquivo antigo | caminho=%s", caminho_log)
 
 
-def formatar_numero_limpo(valor) -> str:
+def formatar_numero_limpo(valor: Any) -> str:
+    """Formata número para o formato do ERP, removendo decimais zerados e usando vírgula."""
     try:
         if pd.isna(valor) or str(valor).strip() == "":
             return ""
@@ -103,218 +101,196 @@ def formatar_numero_limpo(valor) -> str:
 
 
 # =============================================================================
-# CLASSE PRINCIPAL — PROMETEUS ERP AUTOMATION
+# EXCEÇÕES CUSTOMIZADAS
 # =============================================================================
-class AutomacaoApp(ctk.CTk):
+class ErroDeAutenticacao(Exception):
+    """Levantado quando há falha de login."""
+
+class ErroDeValidacao(Exception):
+    """Levantado quando dados são inválidos."""
+
+class ErroDeExecucao(Exception):
+    """Levantado quando há erro na automação visual."""
+
+
+# =============================================================================
+# CONSTANTES E CORES DA UI
+# =============================================================================
+FUNDO_PRINCIPAL = "#0A0A0A"
+SUPERFICIE = "#1C1C1C"
+BORDA_FORTE = "#2A2A2A"
+BORDA_SUTIL = "#3A3A3A"
+TEXTO_SECUNDARIO = "#8C8C8C"
+TEXTO_PRIMARIO = "#BEBEBE"
+TEXTO_DESTAQUE = "#EDEDED"
+OURO_PRINCIPAL = "#D4AF37"
+OURO_ESCURO = "#B8972E"
+ESMERALDA_DEEP = "#006D4E"
+ESMERALDA_PRIMARIA = "#00A36C"
+ESMERALDA_SUCESSO = "#00C17C"
+ERRO = "#C8102E"
+PERIGO = "#8B0000"
+AVISO = "#FFB800"
+
+PADX_PADRAO = 12
+PADY_PADRAO = 10
+
+
+
+# =============================================================================
+# COMPONENTES DE INTERFACE
+# =============================================================================
+class BaseUI(ctk.CTk):
+    """Base para a janela principal com configurações padrões."""
     def __init__(self) -> None:
         super().__init__()
-
-        # Identidade do Projeto
+        ctk.set_appearance_mode("system")
+        ctk.set_default_color_theme("blue")
+        
         self.title("Prometeus System - ERP Automation")
-        self.geometry("500x600")
+        self.geometry("450x600")
         self.resizable(False, False)
-        self.configure(fg_color=BG_DEEP)
+        self.configure(fg_color=FUNDO_PRINCIPAL)
+        
+        self._fila_ui: queue.Queue[dict[str, Any]] = queue.Queue()
+        self._iniciar_loop_fila()
+        
+    def _iniciar_loop_fila(self) -> None:
+        """Processa mensagens da fila de UI a cada 50ms."""
+        self._processar_fila()
 
-        # Estado da Aplicação
-        self.usuario_logado: str = ""
-        self.df_banco = None
+    def _processar_fila(self) -> None:
+        try:
+            while True:
+                mensagem = self._fila_ui.get_nowait()
+                self._tratar_mensagem_ui(mensagem)
+        except queue.Empty:
+            pass
+        self.after(50, self._processar_fila)
+        
+    def _tratar_mensagem_ui(self, mensagem: dict[str, Any]) -> None:
+        """Processa as mensagens da fila na thread principal."""
+        acao = mensagem.get("acao")
+        if acao == "sucesso":
+            self.exibir_feedback_sucesso(mensagem.get("mensagem", "Operação concluída!"))
+        elif acao == "erro":
+            self.exibir_feedback_erro(mensagem.get("mensagem", "Ocorreu um erro."))
+        elif acao == "aviso":
+            self.exibir_feedback_aviso(mensagem.get("mensagem", "Atenção."))
+        elif acao == "callback":
+            callback = mensagem.get("callback")
+            if callable(callback):
+                callback()
+
+    def exibir_feedback_sucesso(self, mensagem: str) -> None:
+        """Exibe popup de sucesso."""
+        messagebox.showinfo("Sucesso", mensagem)
+
+    def exibir_feedback_erro(self, mensagem: str) -> None:
+        """Exibe popup de erro."""
+        messagebox.showerror("Erro", mensagem)
+
+    def exibir_feedback_aviso(self, mensagem: str) -> None:
+        """Exibe popup de aviso."""
+        messagebox.showwarning("Aviso", mensagem)
+
+
+# =============================================================================
+# CLASSE PRINCIPAL
+# =============================================================================
+class AutomacaoApp(BaseUI):
+    """Janela principal da automação."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        
+        self.usuario_logado: str = "SISTEMA"
+        self.df_banco: pd.DataFrame | None = None
         self.caminho_arquivo: str = ""
         self.coluna_sel: str = ""
 
-        self.senhas = {
-            "ROBERTO": "rdsf",
-            "JOEDSON": "aragao",
-            "TAISSA": "fragas",
-            "IGOR": "suri",
-            "JADSON": "j123",
-        }
-        self.usuarios_autorizados = list(self.senhas.keys())
+        self._configurar_grid()
+        self._construir_interface()
 
-        self._configurar_layout_base()
-        self.tela_login()
-
-    def _configurar_layout_base(self):
-        """Define a estrutura de grid e o rodapé fixo."""
-        self.grid_rowconfigure(0, weight=1)
+    def _configurar_grid(self) -> None:
+        """Configura pesos das colunas e linhas base."""
         self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=0)
 
-        # Rodapé Estilizado com o nome do desenvolvedor
-        self.footer = ctk.CTkLabel(
+    def _construir_interface(self) -> None:
+        """Monta o container principal da UI e adiciona o rodapé."""
+        self.main_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.main_frame.grid(row=0, column=0, sticky="nsew")
+        self.main_frame.grid_columnconfigure(0, weight=1)
+        self.main_frame.grid_rowconfigure(0, weight=1)
+        
+        rodape = ctk.CTkLabel(
             self,
-            text="© 2026 ROBERTO SANTOS | PROMETEUS AUTOMATION",
-            font=ctk.CTkFont(family="Segoe UI", size=9, weight="bold"),
-            text_color=GOLD,
-            fg_color="transparent",
+            text="Roberto Santos [LABS]©",
+            font=ctk.CTkFont(size=10),
+            text_color=TEXTO_SECUNDARIO,
         )
-        self.footer.place(relx=0.5, rely=0.96, anchor="center")
+        rodape.grid(
+            row=1,
+            column=0,
+            sticky="ew",
+            padx=PADX_PADRAO,
+            pady=(0, 8),
+        )
 
-    def _criar_card(self):
-        """Helper para criar o container central em estilo Card."""
+        self.tela_pre_selecao()
+    def _limpar_frame(self) -> None:
+        """Remove todos os widgets do frame principal."""
+        for widget in self.main_frame.winfo_children():
+            widget.destroy()
+
+    def _criar_card(self) -> ctk.CTkFrame:
+        """Cria um card para colocar os widgets centralizados."""
         card = ctk.CTkFrame(
-            self, fg_color=BG_FRAME, corner_radius=20, border_width=1, border_color=GOLD
+            self.main_frame, fg_color=SUPERFICIE, corner_radius=16, border_width=1, border_color=BORDA_FORTE
         )
-        card.grid(row=0, column=0, padx=30, pady=(40, 60), sticky="nsew")
+        card.grid(row=0, column=0, padx=30, pady=30, sticky="nsew")
         card.grid_columnconfigure(0, weight=1)
         return card
 
-    # -------------------------------------------------------------------------
-    # TELAS DA INTERFACE
-    # -------------------------------------------------------------------------
-    def tela_login(self) -> None:
-        frame = self._criar_card()
-
-        # Ícone visual (Símbolo Gótico/Ouro)
-        ctk.CTkLabel(frame, text="⚜", font=("Segoe UI", 50), text_color=GOLD).grid(
-            row=0, column=0, pady=(40, 0)
-        )
-
-        ctk.CTkLabel(
-            frame,
-            text="SISTEMA PROMETEUS",
-            font=ctk.CTkFont(
-                family="Segoe UI Variable Display", size=22, weight="bold"
-            ),
-            text_color=TEXT_MAIN,
-        ).grid(row=1, column=0, pady=(0, 25))
-
-        self.combo_usuario = ctk.CTkComboBox(
-            frame,
-            values=self.usuarios_autorizados,
-            width=320,
-            height=45,
-            corner_radius=12,
-            fg_color=BG_DEEP,
-            border_color=EMERALD,
-            button_color=EMERALD,
-            text_color=GOLD,
-            font=("Segoe UI", 13),
-        )
-        self.combo_usuario.set("Selecione sua Identidade")
-        self.combo_usuario.grid(row=2, column=0, pady=10)
-
-        self.entry_senha = ctk.CTkEntry(
-            frame,
-            placeholder_text="Senha de Acesso",
-            show="●",
-            width=320,
-            height=45,
-            corner_radius=12,
-            fg_color=BG_DEEP,
-            border_color=EMERALD,
-            text_color=TEXT_MAIN,
-            placeholder_text_color=TEXT_MUTED,
-        )
-        self.entry_senha.grid(row=3, column=0, pady=10)
-        self.entry_senha.bind("<Return>", lambda _: self.validar_login())
-
-        ctk.CTkButton(
-            frame,
-            text="AUTENTICAR  →",
-            command=self.validar_login,
-            width=320,
-            height=50,
-            corner_radius=12,
-            fg_color=EMERALD,
-            hover_color=EMERALD_HVR,
-            text_color=GOLD,
-            font=ctk.CTkFont(family="Segoe UI", weight="bold"),
-        ).grid(row=4, column=0, pady=(30, 20))
 
     def tela_pre_selecao(self) -> None:
-        frame = self._criar_card()
+        """Monta a tela principal pós-login."""
+        self._limpar_frame()
+        card = self._criar_card()
 
         ctk.CTkLabel(
-            frame,
+            card,
             text="BEM-VINDO AO NÚCLEO,",
-            font=("Segoe UI", 12),
-            text_color=TEXT_MUTED,
+            font=ctk.CTkFont(size=12),
+            text_color=TEXTO_SECUNDARIO,
         ).grid(row=0, column=0, pady=(50, 0))
 
         ctk.CTkLabel(
-            frame,
+            card,
             text=self.usuario_logado,
-            font=("Segoe UI Variable Display", 28, "bold"),
-            text_color=GOLD,
+            font=ctk.CTkFont(size=28, weight="bold"),
+            text_color=OURO_PRINCIPAL,
         ).grid(row=1, column=0, pady=(0, 50))
 
         ctk.CTkButton(
-            frame,
-            text="📂   CARREGAR BASE EXCEL",
+            card,
+            text="CARREGAR BASE EXCEL",
             command=self.abrir_seletor,
-            width=340,
-            height=65,
-            corner_radius=15,
+            width=320,
+            height=60,
+            corner_radius=12,
             fg_color="transparent",
             border_width=2,
-            border_color=EMERALD,
-            hover_color=BG_DEEP,
-            text_color=TEXT_MAIN,
+            border_color=ESMERALDA_PRIMARIA,
+            hover_color=BORDA_FORTE,
+            text_color=TEXTO_PRIMARIO,
             font=ctk.CTkFont(size=14, weight="bold"),
         ).grid(row=2, column=0, pady=20)
 
-    def tela_seletor_colunas(self) -> None:
-        frame = self._criar_card()
-
-        ctk.CTkLabel(
-            frame,
-            text="DADOS PROCESSADOS",
-            font=("Segoe UI", 20, "bold"),
-            text_color=EMERALD,
-        ).grid(row=0, column=0, pady=(40, 5))
-
-        ctk.CTkLabel(
-            frame,
-            text=f"{len(self.df_banco)} registros prontos para envio",
-            font=("Segoe UI", 12),
-            text_color=TEXT_MUTED,
-        ).grid(row=1, column=0, pady=(0, 40))
-
-        self.combo_colunas = ctk.CTkComboBox(
-            frame,
-            values=list(self.df_banco.columns),
-            width=340,
-            height=45,
-            corner_radius=12,
-            fg_color=BG_DEEP,
-            border_color=GOLD,
-            button_color=GOLD,
-            dropdown_hover_color=EMERALD,
-            text_color=TEXT_MAIN,
-        )
-        self.combo_colunas.set("Escolha a Coluna")
-        self.combo_colunas.grid(row=2, column=0, pady=20)
-
-        ctk.CTkButton(
-            frame,
-            text="⚡   INICIAR AUTOMAÇÃO",
-            command=self.executar_automacao,
-            width=340,
-            height=60,
-            corner_radius=12,
-            fg_color=EMERALD,
-            hover_color=EMERALD_HVR,
-            text_color=GOLD,
-            font=ctk.CTkFont(size=14, weight="bold"),
-        ).grid(row=3, column=0, pady=(20, 30))
-
-    # -------------------------------------------------------------------------
-    # LÓGICA OPERACIONAL
-    # -------------------------------------------------------------------------
-    def validar_login(self) -> None:
-        nome = self.combo_usuario.get()
-        if nome == "Selecione sua Identidade" or nome not in self.usuarios_autorizados:
-            messagebox.showwarning("Aviso", "Selecione um usuário válido.")
-            return
-        senha = self.entry_senha.get()
-        if senha != self.senhas.get(nome):
-            messagebox.showwarning("Acesso Negado", "Senha incorreta.")
-            self.entry_senha.delete(0, "end")
-            return
-        self.usuario_logado = nome
-        registrar_log(nome, "Login realizado")
-        self.tela_pre_selecao()
-
     def abrir_seletor(self) -> None:
+        """Abre caixa de diálogo para carregar arquivo Excel."""
         caminho = filedialog.askopenfilename(
             filetypes=(("Arquivos Excel", "*.xlsx *.xls *.xlsm"), ("Todos", "*.*"))
         )
@@ -323,26 +299,104 @@ class AutomacaoApp(ctk.CTk):
             try:
                 self.df_banco = pd.read_excel(self.caminho_arquivo)
                 self.tela_seletor_colunas()
-            except Exception as e:
-                messagebox.showerror("Erro de Leitura", f"Erro ao abrir Excel: {e}")
+            except Exception as erro:
+                logger.exception("abrir_seletor | falha na leitura excel | erro=%s", erro)
+                self._fila_ui.put({"acao": "erro", "mensagem": f"Erro ao abrir Excel: {erro}"})
 
-    def digitar_texto(self, texto: str) -> None:
+    def tela_seletor_colunas(self) -> None:
+        """Monta tela para selecionar a coluna da automação."""
+        if self.df_banco is None:
+            return
+
+        self._limpar_frame()
+        card = self._criar_card()
+
+        ctk.CTkLabel(
+            card,
+            text="DADOS PROCESSADOS",
+            font=ctk.CTkFont(size=20, weight="bold"),
+            text_color=ESMERALDA_PRIMARIA,
+        ).grid(row=0, column=0, pady=(40, 5))
+
+        ctk.CTkLabel(
+            card,
+            text=f"{len(self.df_banco)} registros prontos para envio",
+            font=ctk.CTkFont(size=12),
+            text_color=TEXTO_SECUNDARIO,
+        ).grid(row=1, column=0, pady=(0, 40))
+
+        self.combo_colunas = ctk.CTkComboBox(
+            card,
+            values=list(self.df_banco.columns),
+            width=320,
+            height=45,
+            corner_radius=12,
+            fg_color=FUNDO_PRINCIPAL,
+            border_color=OURO_ESCURO,
+            button_color=OURO_ESCURO,
+            dropdown_hover_color=ESMERALDA_PRIMARIA,
+            text_color=TEXTO_DESTAQUE,
+        )
+        self.combo_colunas.set("Escolha a Coluna")
+        self.combo_colunas.grid(row=2, column=0, pady=20)
+
+        self.btn_iniciar = ctk.CTkButton(
+            card,
+            text="INICIAR AUTOMAÇÃO",
+            command=self.iniciar_automacao_thread,
+            width=320,
+            height=60,
+            corner_radius=12,
+            fg_color=ESMERALDA_PRIMARIA,
+            hover_color=ESMERALDA_DEEP,
+            text_color=FUNDO_PRINCIPAL,
+            font=ctk.CTkFont(size=14, weight="bold"),
+        )
+        self.btn_iniciar.grid(row=3, column=0, pady=(20, 30))
+
+        self.barra_progresso = ctk.CTkProgressBar(card, width=320, height=10, progress_color=ESMERALDA_SUCESSO)
+        self.barra_progresso.grid(row=4, column=0, pady=10)
+        self.barra_progresso.set(0)
+        self.barra_progresso.grid_remove()
+
+    def iniciar_automacao_thread(self) -> None:
+        """Inicia a automação em uma thread separada para não bloquear a UI."""
+        self.coluna_sel = self.combo_colunas.get()
+        if not self.coluna_sel or self.coluna_sel == "Escolha a Coluna":
+            self._fila_ui.put({"acao": "aviso", "mensagem": "Selecione uma coluna válida."})
+            return
+
+        self.btn_iniciar.configure(state="disabled", text="PROCESSANDO...")
+        self.barra_progresso.grid()
+        self.barra_progresso.configure(mode="indeterminnate")
+        self.barra_progresso.start()
+
+        threading.Thread(target=self._executar_automacao_worker, daemon=True).start()
+
+    def _obter_caminho_imagem(self, nome: str) -> str:
+        """Retorna caminho para arquivo de imagem (dependência externa)."""
+        return os.path.normpath(os.path.join(BASE_DIR, nome))
+
+    def _digitar_texto(self, texto: str) -> None:
+        """Função auxiliar de digitação na thread worker."""
         pyautogui.write(str(texto), interval=0.05)
         time.sleep(1.0)
         pyautogui.press("enter")
         time.sleep(2.0)
-        img_destino = obter_caminho("destino.png")
+        
+        img_destino = self._obter_caminho_imagem("destino.png")
         if os.path.exists(img_destino):
             for _ in range(20):
                 try:
                     if pyautogui.locateOnScreen(img_destino, confidence=0.8):
                         break
-                except:
+                except Exception:
                     pass
                 time.sleep(0.5)
 
-    def verificar_popup(self, ultimo_codigo: str) -> bool:
-        img_popup = obter_caminho("popup.png")
+    def _verificar_popup(self, ultimo_codigo: str) -> bool:
+        """Verifica a ocorrência de popup de erro/bloqueio."""
+        img_popup = self._obter_caminho_imagem("popup.png")
         if os.path.exists(img_popup):
             try:
                 if pyautogui.locateOnScreen(img_popup, confidence=0.6):
@@ -353,27 +407,26 @@ class AutomacaoApp(ctk.CTk):
                         ultimo_codigo,
                     )
                     return True
-            except:
+            except Exception:
                 pass
         return False
 
-    def executar_automacao(self) -> None:
+    def _executar_automacao_worker(self) -> None:
+        """Worker thread responsável por manipular pyautogui sem travar a interface."""
         try:
-            self.coluna_sel = self.combo_colunas.get()
-            if not self.coluna_sel or self.coluna_sel == "Escolha a Coluna":
-                messagebox.showwarning("Aviso", "Selecione uma coluna!")
-                return
-
-            img_destino = obter_caminho("destino.png")
-            img_vazio = obter_caminho("item_vazio.png")
+            img_destino = self._obter_caminho_imagem("destino.png")
+            img_vazio = self._obter_caminho_imagem("item_vazio.png")
 
             if not os.path.exists(img_destino) or not os.path.exists(img_vazio):
                 msg = (
-                    f"Arquivos Críticos Ausentes na pasta:\n{PASTA_IMAGENS}\n\n"
+                    f"Arquivos Críticos Ausentes no diretório:\n{BASE_DIR}\n\n"
                     f"Verifique se 'destino.png' e 'item_vazio.png' estão presentes."
                 )
-                messagebox.showerror("Erro de Distribuição", msg)
+                self._fila_ui.put({"acao": "erro", "mensagem": msg})
                 return
+
+            if self.df_banco is None:
+                raise ErroDeValidacao("Banco de dados não foi carregado corretamente.")
 
             df_proc = self.df_banco.copy()
             df_proc[self.coluna_sel] = pd.to_numeric(
@@ -385,10 +438,12 @@ class AutomacaoApp(ctk.CTk):
             ]
 
             if df_filtrado.empty:
-                messagebox.showinfo("Fim", "Nenhum valor válido para processar.")
+                self._fila_ui.put({"acao": "aviso", "mensagem": "Nenhum valor válido para processar."})
                 return
 
-            self.iconify()
+            # Ocultar janela
+            self._fila_ui.put({"acao": "callback", "callback": self.iconify})
+            
             registrar_log(
                 self.usuario_logado,
                 f"Início — Itens: {len(df_filtrado)}",
@@ -404,6 +459,7 @@ class AutomacaoApp(ctk.CTk):
                 pyautogui.press("enter")
 
             col_item_nome = self.df_banco.columns[0]
+            
             for idx, row in df_filtrado.iterrows():
                 qtd = formatar_numero_limpo(row[self.coluna_sel])
                 item = formatar_numero_limpo(self.df_banco.loc[idx, col_item_nome])
@@ -418,39 +474,50 @@ class AutomacaoApp(ctk.CTk):
                         )
                         if pos_vazio:
                             break
-                    except:
+                    except Exception:
                         pass
                     time.sleep(1.5)
 
                 if pos_vazio:
                     pyautogui.click(pos_vazio)
                     time.sleep(1.0)
-                    self.digitar_texto(comando)
-                    if self.verificar_popup(comando):
-                        messagebox.showerror(
-                            "Erro ERP", f"Interrupção no item: {comando}"
-                        )
+                    self._digitar_texto(comando)
+                    
+                    if self._verificar_popup(comando):
+                        self._fila_ui.put({"acao": "erro", "mensagem": f"Interrupção no item: {comando}"})
                         break
+                        
                     registrar_log(
                         self.usuario_logado, "Item OK", self.coluna_sel, comando
                     )
                 else:
-                    messagebox.showerror(
-                        "Erro de Sincronia", f"Campo não limpou para: {comando}"
-                    )
+                    self._fila_ui.put({"acao": "erro", "mensagem": f"Campo não limpou para: {comando}"})
                     break
 
-            messagebox.showinfo("Sucesso", "Fim do processamento!")
-        except Exception:
-            messagebox.showerror("Erro Inesperado", traceback.format_exc())
+            self._fila_ui.put({"acao": "sucesso", "mensagem": "Fim do processamento!"})
+
+        except Exception as erro:
+            logger.exception("_executar_automacao_worker | falha inesperada | erro=%s", erro)
+            self._fila_ui.put({"acao": "erro", "mensagem": f"Erro interno: {erro}"})
         finally:
-            self.deiconify()
+            # Restaurar estado da interface
+            def restaurar() -> None:
+                self.deiconify()
+                self.barra_progresso.stop()
+                self.barra_progresso.grid_remove()
+                self.btn_iniciar.configure(state="normal", text="INICIAR AUTOMAÇÃO")
+                
+            self._fila_ui.put({"acao": "callback", "callback": restaurar})
 
 
 # =============================================================================
 # INICIALIZAÇÃO
 # =============================================================================
+def main() -> None:
+    """Ponto de entrada."""
+    app = AutomacaoApp()
+    app.mainloop()
+
 if __name__ == "__main__":
-    if LicenseManager.verificar_licenca():
-        app = AutomacaoApp()
-        app.mainloop()
+    main()
+
