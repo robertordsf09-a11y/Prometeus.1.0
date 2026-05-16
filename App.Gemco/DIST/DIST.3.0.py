@@ -46,8 +46,10 @@ def criar_logger(nome_modulo: str, usuario: str = "sistema") -> logging.Logger:
     usuario_real = os.environ.get("PROMETEUS_USER", usuario)
     dir_base = os.environ.get("PROMETEUS_ROOT_DIR", BASE_DIR)
     nome_log = os.environ.get("PROMETEUS_APP_NAME", "aplicacao")
-    
-    formato = f"[%(asctime)s],[{usuario_real}],[{nome_modulo}] %(levelname)s: %(message)s"
+
+    formato = (
+        f"[%(asctime)s],[{usuario_real}],[{nome_modulo}] %(levelname)s: %(message)s"
+    )
     formatador = logging.Formatter(formato, datefmt="%Y-%m-%d %H:%M:%S")
 
     caminho_log = os.path.join(dir_base, "logs", f"{nome_log}.log")
@@ -63,11 +65,11 @@ def criar_logger(nome_modulo: str, usuario: str = "sistema") -> logging.Logger:
 
     logger_inst = logging.getLogger(nome_modulo)
     logger_inst.setLevel(logging.INFO)
-    
+
     if not logger_inst.handlers:
         logger_inst.addHandler(handler_arquivo)
         logger_inst.addHandler(handler_console)
-        
+
     return logger_inst
 
 
@@ -94,8 +96,10 @@ def formatar_numero_limpo(valor: Any) -> str:
 class ErroDeAutenticacao(Exception):
     """Levantado quando há falha de login."""
 
+
 class ErroDeValidacao(Exception):
     """Levantado quando dados são inválidos."""
+
 
 class ErroDeExecucao(Exception):
     """Levantado quando há erro na automação visual."""
@@ -124,25 +128,25 @@ PADX_PADRAO = 12
 PADY_PADRAO = 10
 
 
-
 # =============================================================================
 # COMPONENTES DE INTERFACE
 # =============================================================================
 class BaseUI(ctk.CTk):
     """Base para a janela principal com configurações padrões."""
+
     def __init__(self) -> None:
         super().__init__()
         ctk.set_appearance_mode("system")
         ctk.set_default_color_theme("blue")
-        
+
         self.title("Prometeus System - ERP Automation")
         self.geometry("450x600")
         self.resizable(False, False)
         self.configure(fg_color=FUNDO_PRINCIPAL)
-        
+
         self._fila_ui: queue.Queue[dict[str, Any]] = queue.Queue()
         self._iniciar_loop_fila()
-        
+
     def _iniciar_loop_fila(self) -> None:
         """Processa mensagens da fila de UI a cada 50ms."""
         self._processar_fila()
@@ -155,12 +159,14 @@ class BaseUI(ctk.CTk):
         except queue.Empty:
             pass
         self.after(50, self._processar_fila)
-        
+
     def _tratar_mensagem_ui(self, mensagem: dict[str, Any]) -> None:
         """Processa as mensagens da fila na thread principal."""
         acao = mensagem.get("acao")
         if acao == "sucesso":
-            self.exibir_feedback_sucesso(mensagem.get("mensagem", "Operação concluída!"))
+            self.exibir_feedback_sucesso(
+                mensagem.get("mensagem", "Operação concluída!")
+            )
         elif acao == "erro":
             self.exibir_feedback_erro(mensagem.get("mensagem", "Ocorreu um erro."))
         elif acao == "aviso":
@@ -191,7 +197,7 @@ class AutomacaoApp(BaseUI):
 
     def __init__(self) -> None:
         super().__init__()
-        
+
         self.usuario_logado: str = "SISTEMA"
         self.df_banco: pd.DataFrame | None = None
         self.caminho_arquivo: str = ""
@@ -212,7 +218,7 @@ class AutomacaoApp(BaseUI):
         self.main_frame.grid(row=0, column=0, sticky="nsew")
         self.main_frame.grid_columnconfigure(0, weight=1)
         self.main_frame.grid_rowconfigure(0, weight=1)
-        
+
         rodape = ctk.CTkLabel(
             self,
             text="Roberto Santos [LABS]©",
@@ -228,6 +234,7 @@ class AutomacaoApp(BaseUI):
         )
 
         self.tela_pre_selecao()
+
     def _limpar_frame(self) -> None:
         """Remove todos os widgets do frame principal."""
         for widget in self.main_frame.winfo_children():
@@ -236,12 +243,15 @@ class AutomacaoApp(BaseUI):
     def _criar_card(self) -> ctk.CTkFrame:
         """Cria um card para colocar os widgets centralizados."""
         card = ctk.CTkFrame(
-            self.main_frame, fg_color=SUPERFICIE, corner_radius=16, border_width=1, border_color=BORDA_FORTE
+            self.main_frame,
+            fg_color=SUPERFICIE,
+            corner_radius=16,
+            border_width=1,
+            border_color=BORDA_FORTE,
         )
         card.grid(row=0, column=0, padx=30, pady=30, sticky="nsew")
         card.grid_columnconfigure(0, weight=1)
         return card
-
 
     def tela_pre_selecao(self) -> None:
         """Monta a tela principal pós-login."""
@@ -288,8 +298,12 @@ class AutomacaoApp(BaseUI):
                 self.df_banco = pd.read_excel(self.caminho_arquivo)
                 self.tela_seletor_colunas()
             except Exception as erro:
-                logger.exception("abrir_seletor | falha na leitura excel | erro=%s", erro)
-                self._fila_ui.put({"acao": "erro", "mensagem": f"Erro ao abrir Excel: {erro}"})
+                logger.exception(
+                    "abrir_seletor | falha na leitura excel | erro=%s", erro
+                )
+                self._fila_ui.put(
+                    {"acao": "erro", "mensagem": f"Erro ao abrir Excel: {erro}"}
+                )
 
     def tela_seletor_colunas(self) -> None:
         """Monta tela para selecionar a coluna da automação."""
@@ -342,7 +356,9 @@ class AutomacaoApp(BaseUI):
         )
         self.btn_iniciar.grid(row=3, column=0, pady=(20, 30))
 
-        self.barra_progresso = ctk.CTkProgressBar(card, width=320, height=10, progress_color=ESMERALDA_SUCESSO)
+        self.barra_progresso = ctk.CTkProgressBar(
+            card, width=320, height=10, progress_color=ESMERALDA_SUCESSO
+        )
         self.barra_progresso.grid(row=4, column=0, pady=10)
         self.barra_progresso.set(0)
         self.barra_progresso.grid_remove()
@@ -351,7 +367,9 @@ class AutomacaoApp(BaseUI):
         """Inicia a automação em uma thread separada para não bloquear a UI."""
         self.coluna_sel = self.combo_colunas.get()
         if not self.coluna_sel or self.coluna_sel == "Escolha a Coluna":
-            self._fila_ui.put({"acao": "aviso", "mensagem": "Selecione uma coluna válida."})
+            self._fila_ui.put(
+                {"acao": "aviso", "mensagem": "Selecione uma coluna válida."}
+            )
             return
 
         self.btn_iniciar.configure(state="disabled", text="PROCESSANDO...")
@@ -371,7 +389,7 @@ class AutomacaoApp(BaseUI):
         time.sleep(1.0)
         pyautogui.press("enter")
         time.sleep(2.0)
-        
+
         img_destino = self._obter_caminho_imagem("destino.png")
         if os.path.exists(img_destino):
             for _ in range(20):
@@ -381,8 +399,8 @@ class AutomacaoApp(BaseUI):
                 except Exception:
                     pass
                 time.sleep(0.5)
-    
-    '''verificar popup deve verificar se algum dos popups da lista de popups aparece na tela: popup.png, ERRODV.png'''
+
+    """verificar popup deve verificar se algum dos popups da lista de popups aparece na tela: popup.png, ERRODV.png"""
 
     def _verificar_popup(self, ultimo_codigo: str) -> bool:
         """Verifica a ocorrência de popup de erro/bloqueio."""
@@ -430,12 +448,14 @@ class AutomacaoApp(BaseUI):
             ]
 
             if df_filtrado.empty:
-                self._fila_ui.put({"acao": "aviso", "mensagem": "Nenhum valor válido para processar."})
+                self._fila_ui.put(
+                    {"acao": "aviso", "mensagem": "Nenhum valor válido para processar."}
+                )
                 return
 
-            # Ocultar janela
-            self._fila_ui.put({"acao": "callback", "callback": self.iconify})
-            
+            # Ocultar janela (mantendo janela visível)
+            # self._fila_ui.put({"acao": "callback", "callback": self.iconify})
+
             logger.info(
                 "Início da automação | itens=%d | col=%s",
                 len(df_filtrado),
@@ -451,7 +471,7 @@ class AutomacaoApp(BaseUI):
                 pyautogui.press("enter")
 
             col_item_nome = self.df_banco.columns[0]
-            
+
             for idx, row in df_filtrado.iterrows():
                 qtd = formatar_numero_limpo(row[self.coluna_sel])
                 item = formatar_numero_limpo(self.df_banco.loc[idx, col_item_nome])
@@ -474,24 +494,36 @@ class AutomacaoApp(BaseUI):
                     pyautogui.click(pos_vazio)
                     time.sleep(1.0)
                     self._digitar_texto(comando)
-                    
+
                     if self._verificar_popup(comando):
-                        self._fila_ui.put({"acao": "erro", "mensagem": f"Interrupção no item: {comando}"})
+                        self._fila_ui.put(
+                            {
+                                "acao": "erro",
+                                "mensagem": f"Interrupção no item: {comando}",
+                            }
+                        )
                         break
-                        
+
                     logger.info(
                         "Item processado com sucesso | col=%s | val=%s",
                         self.coluna_sel,
                         comando,
                     )
                 else:
-                    self._fila_ui.put({"acao": "erro", "mensagem": f"Campo não limpou para: {comando}"})
+                    self._fila_ui.put(
+                        {
+                            "acao": "erro",
+                            "mensagem": f"Campo não limpou para: {comando}",
+                        }
+                    )
                     break
 
             self._fila_ui.put({"acao": "sucesso", "mensagem": "Fim do processamento!"})
 
         except Exception as erro:
-            logger.exception("_executar_automacao_worker | falha inesperada | erro=%s", erro)
+            logger.exception(
+                "_executar_automacao_worker | falha inesperada | erro=%s", erro
+            )
             self._fila_ui.put({"acao": "erro", "mensagem": f"Erro interno: {erro}"})
         finally:
             # Restaurar estado da interface
@@ -500,7 +532,7 @@ class AutomacaoApp(BaseUI):
                 self.barra_progresso.stop()
                 self.barra_progresso.grid_remove()
                 self.btn_iniciar.configure(state="normal", text="INICIAR AUTOMAÇÃO")
-                
+
             self._fila_ui.put({"acao": "callback", "callback": restaurar})
 
 
@@ -512,21 +544,25 @@ def main() -> None:
     app = AutomacaoApp()
     app.mainloop()
 
+
 def validar_execucao_segura() -> None:
     import os
     import sys
+
     token = os.environ.get("PROMETEUS_AUTH_TOKEN")
     if token != "PR0M3T3U5_L0CK_2026":
         from tkinter import messagebox
         import customtkinter as ctk
+
         root = ctk.CTk()
         root.withdraw()
         messagebox.showerror(
             "Acesso Negado",
             "Este módulo não pode ser executado isoladamente.\n\n"
-            "Por favor, inicie o sistema através do painel principal (Prometeus) e realize o login."
+            "Por favor, inicie o sistema através do painel principal (Prometeus) e realize o login.",
         )
         sys.exit(1)
+
 
 if __name__ == "__main__":
     validar_execucao_segura()
@@ -537,4 +573,3 @@ if __name__ == "__main__":
     except Exception:
         logger.exception("Falha crítica na execução da sub-aplicação DIST")
         sys.exit(1)
-
